@@ -1,0 +1,92 @@
+{
+    "T1": {
+        "start": "2026-06-02T08:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 2,
+        "pt_ci": 130.84,
+        "target_ci": 196.99,
+        "saved_g": -132.3,
+        "pct": -50.6
+    },
+    "T2": {
+        "start": "2026-06-02T08:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 1,
+        "pt_ci": 130.84,
+        "target_ci": 196.99,
+        "saved_g": -66.15,
+        "pct": -50.6
+    },
+    "T3": {
+        "start": "2026-06-02T08:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 1,
+        "pt_ci": 130.84,
+        "target_ci": 196.99,
+        "saved_g": -66.15,
+        "pct": -50.6
+    },
+    "T4": {
+        "start": "2026-06-02T09:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 1,
+        "pt_ci": 130.84,
+        "target_ci": 177.82,
+        "saved_g": -46.98,
+        "pct": -35.9
+    },
+    "T5": {
+        "start": "2026-06-02T09:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 2,
+        "pt_ci": 130.84,
+        "target_ci": 177.82,
+        "saved_g": -93.96,
+        "pct": -35.9
+    },
+    "T6": {
+        "start": "2026-06-02T09:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 1,
+        "pt_ci": 130.84,
+        "target_ci": 177.82,
+        "saved_g": -46.98,
+        "pct": -35.9
+    },
+    "T7": {
+        "start": "2026-06-02T10:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 1,
+        "pt_ci": 130.84,
+        "target_ci": 169.46,
+        "saved_g": -38.62,
+        "pct": -29.5
+    },
+    "T8": {
+        "start": "2026-06-02T10:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 1,
+        "pt_ci": 130.84,
+        "target_ci": 169.46,
+        "saved_g": -38.62,
+        "pct": -29.5
+    },
+    "T9": {
+        "start": "2026-06-02T10:00:00",
+        "dur": 1,
+        "region": "DE",
+        "cores": 2,
+        "pt_ci": 130.84,
+        "target_ci": 169.46,
+        "saved_g": -77.24,
+        "pct": -29.5
+    }
+}
