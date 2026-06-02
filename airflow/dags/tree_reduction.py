@@ -2,10 +2,10 @@ import os
 import numpy as np
 import datetime as dt
 from airflow import DAG
-from airflow.decorators import task
+from airflow.sdk import task
 
 # --- CONFIGURATION ---
-DATA_DIR = "/home/gonca/airflow/data/tree_reduction_test/"
+DATA_DIR = "/home/gonca/Carbon_Scheduler/airflow/data/tree_reduction_test/"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 ARRAY_SIZE = 5000
@@ -42,7 +42,7 @@ with DAG(
     schedule=None,
     catchup=False,
     params={
-        "deadline_iso": (dt.datetime.now() + dt.timedelta(days=3)).isoformat(),
+        "deadline_iso": "2026-06-03T00:00:00" if os.getenv("AIRFLOW_IS_PARSING") else (dt.datetime.now() + dt.timedelta(days=3)).isoformat(),
         "workflow_structure": WORKFLOW_METADATA,
         "edges": EDGES,
         "sla_level": 95

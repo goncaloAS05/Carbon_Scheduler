@@ -2,6 +2,7 @@ from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from datetime import datetime, timedelta
 import datetime as dt
+import os
 
 
 # Define the workflow structure for the Alg 1 Planner
@@ -24,12 +25,12 @@ with DAG(
     schedule=None, 
     catchup=False,
     params={
-        "deadline_iso": (dt.datetime.now() + dt.timedelta(days=1)).isoformat(), 
-        "workflow_structure": WORKFLOW_METADATA,
-        "input_data_gb": 1,
-        "sla_confidence": 90  # <---  90% Confidence
+        'deadline_iso': "2026-06-03T00:00:00" if os.getenv("AIRFLOW_IS_PARSING") else (dt.datetime.now() + dt.timedelta(days=1)).isoformat(), 
+        'workflow_structure': WORKFLOW_METADATA, 
+        'input_data_gb': 1, 
+        'sla_confidence': 90
     }
-) as dag:
+    ) as dag:
 
     # Helper to avoid repetitive code
     def create_pod_task(tid, name, sleep_time):

@@ -6,7 +6,7 @@ from airflow.sdk import task
 from airflow.sdk import get_current_context
 
 # --- CONFIGURATION ---
-DATA_DIR = "/home/gonca/airflow/data/matrix_test/"
+DATA_DIR = "/home/gonca/Carbon_Scheduler/airflow/data/matrix_test/"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 ROWS = 2000
@@ -42,7 +42,7 @@ with DAG(
     schedule=None,
     catchup=False,
     params={
-        "deadline_iso": (dt.datetime.now() + dt.timedelta(days=3)).isoformat(),
+        "deadline_iso": "2026-06-03T00:00:00" if os.getenv("AIRFLOW_IS_PARSING") else (dt.datetime.now() + dt.timedelta(days=1)).isoformat(),
         "workflow_structure": WORKFLOW_METADATA,
         "edges": EDGES,
         "sla_level": 95
