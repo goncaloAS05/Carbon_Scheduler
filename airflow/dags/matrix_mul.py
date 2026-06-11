@@ -5,7 +5,7 @@ from airflow import DAG
 from airflow.sdk import task
 from airflow.sdk import get_current_context
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION & METADATA FOR PLANNER ---
 DATA_DIR = "/home/gonca/Carbon_Scheduler/airflow/data/matrix_test/"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -14,21 +14,35 @@ COLS = 2000
 CHUNK_A_SIZE = 250
 CHUNK_B_SIZE = 500
 
-# Metadata for Algorithm 4 Planner
-# We define 32 mult tasks and 1 aggregate task
+# 1. Declarar TODAS as tarefas explicitamente para o Planeador
 WORKFLOW_METADATA = [
-    {"id": "setup_matrices", "dur": 1, "cores": 2},
-    {"id": "prepare_pairs", "dur": 1, "cores": 1}
+    {"id": "setup_matrices", "dur": 1, "cores": 2, "depends_on": []},
+    {"id": "prepare_pairs", "dur": 1, "cores": 1, "depends_on": ["setup_matrices"]}
 ]
 
+# Adicionar as 32 tarefas mapeadas dinamicamente
 for i in range(32):
-    WORKFLOW_METADATA.append({"id": f"multiply_chunk__{i}", "dur": 1, "cores": 2})
-WORKFLOW_METADATA.append({"id": "aggregate", "dur": 1, "cores": 4})
+    WORKFLOW_METADATA.append({
+        "id": f"multiply_chunk__{i}", 
+        "dur": 1, 
+        "cores": 2, 
+        "depends_on": ["prepare_pairs"] # <- Agora o planeador sabe que elas esperam pelo prepare_pairs!
+    })
 
-# --- FIXED EDGES ---
-EDGES = []
+# Adicionar a tarefa de agregação final
+WORKFLOW_METADATA.append({
+    "id": "aggregate", 
+    "dur": 1, 
+    "cores": 4, 
+    "depends_on": [f"multiply_chunk__{i}" for i in range(32)] # <- Depende de todas as multiplicações
+})
+
+# 2. DEFINIR OS EDGES COMPLETOS (Para manter compatibilidade se o Alg 3/4 pedir a lista de arestas)
+EDGES = [
+    ("setup_matrices", "prepare_pairs")
+]
 for i in range(32):
-    # Only (Source_ID, Destination_ID)
+    EDGES.append(("prepare_pairs", f"multiply_chunk__{i}"))
     EDGES.append((f"multiply_chunk__{i}", "aggregate"))
 
 default_args = {
@@ -42,7 +56,7 @@ with DAG(
     schedule=None,
     catchup=False,
     params={
-        "deadline_iso": "2026-06-03T00:00:00" if os.getenv("AIRFLOW_IS_PARSING") else (dt.datetime.now() + dt.timedelta(days=1)).isoformat(),
+        "deadline_iso": "2026-06-03T00:00:00" if os.getenv("AIRFLOW_IS_PARSING") else (dt.datetime.now() + dt.timedelta(days=3)).isoformat(),
         "workflow_structure": WORKFLOW_METADATA,
         "edges": EDGES,
         "sla_level": 95

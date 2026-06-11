@@ -4,19 +4,17 @@ from datetime import datetime, timedelta
 import datetime as dt
 import os
 
-
-# Define the workflow structure for the Alg 1 Planner
 # dur = hours (standardized execution time)
 WORKFLOW_METADATA = [
-    {'id': 'T1', 'dur': 1, 'cores': 2, 'downstream': ['T2', 'T3', 'T4']},
-    {'id': 'T2', 'dur': 1, 'cores': 1, 'downstream': ['T5']},
-    {'id': 'T3', 'dur': 1, 'cores': 1, 'downstream': ['T5']},
-    {'id': 'T4', 'dur': 1, 'cores': 1, 'downstream': ['T5']},
-    {'id': 'T5', 'dur': 1, 'cores': 2, 'downstream': ['T6', 'T7', 'T8']},
-    {'id': 'T6', 'dur': 1, 'cores': 1, 'downstream': ['T9']},
-    {'id': 'T7', 'dur': 1, 'cores': 1, 'downstream': ['T9']},
-    {'id': 'T8', 'dur': 1, 'cores': 1, 'downstream': ['T9']},
-    {'id': 'T9', 'dur': 1, 'cores': 2, 'downstream': []},
+    {'id': 'T1', 'dur': 1, 'cores': 2, 'depends_on': [], "output_size_gb": 15.5},
+    {'id': 'T2', 'dur': 1, 'cores': 1, 'depends_on': ['T1'], "output_size_gb": 5.0},
+    {'id': 'T3', 'dur': 1, 'cores': 1, 'depends_on': ['T1'], "output_size_gb": 5.0},
+    {'id': 'T4', 'dur': 1, 'cores': 1, 'depends_on': ['T1'], "output_size_gb": 5.0},
+    {'id': 'T5', 'dur': 1, 'cores': 2, 'depends_on': ['T2', 'T3', 'T4'], "output_size_gb": 15.0}, # Nó de junção (Merge)
+    {'id': 'T6', 'dur': 1, 'cores': 1, 'depends_on': ['T5'], "output_size_gb": 5.0},
+    {'id': 'T7', 'dur': 1, 'cores': 1, 'depends_on': ['T5'], "output_size_gb": 5.0},
+    {'id': 'T8', 'dur': 1, 'cores': 1, 'depends_on': ['T5'], "output_size_gb": 5.0},
+    {'id': 'T9', 'dur': 1, 'cores': 2, 'depends_on': ['T6', 'T7', 'T8'], "output_size_gb": 15.0}, # Nó de junção final
 ]
 
 with DAG(
