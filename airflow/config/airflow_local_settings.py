@@ -1,6 +1,6 @@
 import os
 import json
-import fcntl  # NOTE: also imported again at line ~2014 (duplicate removed below)
+import fcntl  
 import copy
 import datetime as dt
 import math
@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
+import itertools
 from airflow.exceptions import AirflowRescheduleException
 
 # --- System Paths & Storage Configurations ---
@@ -18,22 +19,26 @@ AIRFLOW_BASE_DIR = os.path.expanduser("~/Carbon_Scheduler/airflow")
 CLUSTER_FILE     = os.path.join(AIRFLOW_BASE_DIR, "cluster_state.json")
 DATA_DIR         = os.path.join(AIRFLOW_BASE_DIR, "plugins", "data", "")
 PLAN_DIR         = os.path.join(AIRFLOW_BASE_DIR, "plans", "")
+ORDERS_DIR       = os.path.join(AIRFLOW_BASE_DIR, "orders", "")
 HISTORY_FILE     = os.path.join(AIRFLOW_BASE_DIR, "task_history.json")
 WAITING_ROOM_DIR = os.path.join(AIRFLOW_BASE_DIR, "waiting_room", "")
 
 # --- Simulation Engine Parameters ---
 ACTIVE_ALGORITHM = 4
 BATCH_SIZE = 3
-TOTAL_CORES_PER_REGION = 4
-REGIONS = ["DE", "PL"]  
+TOTAL_CORES_PER_REGION = 6
+CORES_LIMIT = TOTAL_CORES_PER_REGION
+REGIONS = ["DE", "PL", "PT", "ES"]  
 
 # --- Network Modeling Coefficients ---
 DATA_SIZE_GB = 1
 TRANSFER_SPEED_GBPS = 400 / 8  # Converted to MB/s equivalent bounds
 KWH_PER_GB = 0.001875
+DEADLINE_PENALTY_MULTIPLIER = 1.5
 
 # Initialize required execution directories
 os.makedirs(PLAN_DIR, exist_ok=True)
+os.makedirs(ORDERS_DIR, exist_ok=True)
 os.makedirs(WAITING_ROOM_DIR, exist_ok=True)
 
 def plot_optimization_window_heatmap(best_manifest, all_regions_data, submission_time, deadline, plot_name="default", stats=None):
@@ -115,7 +120,9 @@ def plot_optimization_window_heatmap(best_manifest, all_regions_data, submission
             f"Avg Task Dur: {stats.get('avg_task_execution_time_hours', 0)}h   |   "
             f"Deadline Fulfilled: {stats.get('deadline_fulfillment_pct', 100.0)}%   |   "
             f"Energy: {stats['total_energy']} kWh   |   "
-            f"Total Carbon: {stats['total_carbon']} gCO2"
+            f"Execution Carbon: {stats['total_carbon']} gCO2\n"  # CHANGED: renamed for clarity
+            f"Transfer Carbon: {stats.get('total_transfer_carbon', 0.0)} gCO2   |   "  # NEW
+            f"Total Carbon (incl. transfer): {stats.get('total_carbon_with_transfer', stats['total_carbon'])} gCO2"  # NEW
         )
         
         # Placed at the very bottom center using figure coordinates
@@ -127,7 +134,7 @@ def plot_optimization_window_heatmap(best_manifest, all_regions_data, submission
     plt.xticks(rotation=0)
     
     # Adjusted rect bottom bounds to 0.12 so the two-line text box has plenty of room
-    plt.tight_layout(rect=[0, 0.12, 1, 0.95]) 
+    plt.tight_layout(rect=[0, 0.15, 1, 0.95]) 
     
     # Save
     save_path = os.path.join(PLAN_DIR, f"heatmap_{plot_name}.png")
@@ -138,49 +145,55 @@ def plot_optimization_window_heatmap(best_manifest, all_regions_data, submission
 def calculate_standardized_stats(plan, all_traces, window_start, total_requested, deadline=None):
     total_energy = 0.0
     total_carbon = 0.0
+    total_transfer_carbon = 0.0
     planned_starts = []
     planned_ends = []
     task_durations = []
     active_hours = set()
-    POWER_FACTOR = 0.2  # 0.2 kW per core
+    POWER_FACTOR = 0.2
+
+    # NEW: Track strictly deadline-compliant tasks
+    successful_tasks = 0  
+    naive_deadline = deadline.replace(tzinfo=None) if deadline else None
 
     for tid, tdata in plan.items():
-        # 1. Energy Calculation
         task_energy = tdata['cores'] * tdata['dur'] * POWER_FACTOR
         total_energy += task_energy
-        
-        # 2. Per-Hour Carbon Calculation
+
         start_dt = dt.datetime.fromisoformat(tdata['start']).replace(tzinfo=None)
+        end_dt = start_dt + dt.timedelta(hours=tdata['dur'])
+        
         planned_starts.append(start_dt)
         task_durations.append(tdata['dur'])
         reg = tdata['region']
-        
+
         for h in range(tdata['dur']):
             hour_obj = start_dt + dt.timedelta(hours=h)
-            intensity = all_traces.get(reg, {}).get(hour_obj, 400) 
+            intensity = all_traces.get(reg, {}).get(hour_obj, 400)
             total_carbon += (tdata['cores'] * POWER_FACTOR) * intensity
             active_hours.add(hour_obj.isoformat())
-            
-        planned_ends.append(start_dt + dt.timedelta(hours=tdata['dur']))
 
-    success_rate = round((len(plan) / total_requested) * 100, 1) if total_requested > 0 else 0
-    
+        planned_ends.append(end_dt)
+        total_transfer_carbon += tdata.get('transfer_carbon_g', 0.0)
+
+        # EVALUATE SUCCESS: Did this specific task finish before the deadline?
+        if naive_deadline and end_dt > naive_deadline:
+            pass # Task ran late! (Does not count towards success_rate)
+        else:
+            successful_tasks += 1
+
+    # Success rate now reflects the penalty of scheduling past the deadline
+    success_rate = round((successful_tasks / total_requested) * 100, 1) if total_requested > 0 else 0
+
     if plan and planned_starts and planned_ends:
         first_start = min(planned_starts)
         last_end = max(planned_ends)
-        
         total_execution_time = len(active_hours)
         makespan = round((last_end - first_start).total_seconds() / 3600, 2)
         waiting_time = round((first_start - window_start).total_seconds() / 3600, 2)
         avg_task_execution = round(sum(task_durations) / len(task_durations), 2)
         
-        if deadline:
-            naive_deadline = deadline.replace(tzinfo=None)
-            deadline_fulfilled_pct = 100.0 if last_end <= naive_deadline else 0.0
-        else:
-            deadline_fulfilled_pct = 100.0
-            
-        # Reverting this key back to 'total_hours' to fix the script crash
+        deadline_fulfilled_pct = 100.0 if (naive_deadline and last_end <= naive_deadline) else 0.0
         total_hours = round((last_end - window_start).total_seconds() / 3600, 2)
     else:
         total_execution_time = 0
@@ -190,237 +203,87 @@ def calculate_standardized_stats(plan, all_traces, window_start, total_requested
         deadline_fulfilled_pct = 0.0
         total_hours = 0
 
+    total_carbon_with_transfer = total_carbon + total_transfer_carbon
+    total_core_hours = total_energy / POWER_FACTOR if POWER_FACTOR > 0 else 0.0
+    
+    carbon_per_core_hour = round(total_carbon_with_transfer / total_core_hours, 4) if total_core_hours > 0 else 0.0
+    carbon_per_success_pct = round(total_carbon_with_transfer / success_rate, 4) if success_rate > 0 else 0.0
+    carbon_per_makespan_hour = round(total_carbon_with_transfer / makespan, 4) if makespan > 0 else 0.0
+    makespan_hours_per_carbon = round(makespan / total_carbon_with_transfer, 6) if total_carbon_with_transfer > 0 else 0.0
+
     return {
         "success_rate": success_rate,
-        "total_hours": total_hours,  # Changed back from 'legacy_total_hours'
+        "total_hours": total_hours,
         "total_energy": round(total_energy, 2),
         "total_carbon": round(total_carbon, 2),
-        
-        # Professor's metrics remain completely intact
+        "total_transfer_carbon": round(total_transfer_carbon, 2),
+        "total_carbon_with_transfer": round(total_carbon_with_transfer, 2), 
         "total_execution_time_hours": total_execution_time,
         "makespan_hours": makespan,
         "waiting_time_hours": waiting_time,
         "avg_task_execution_time_hours": avg_task_execution,
-        "deadline_fulfillment_pct": deadline_fulfilled_pct
+        "deadline_fulfillment_pct": deadline_fulfilled_pct,
+        "carbon_per_core_hour": carbon_per_core_hour,
+        "carbon_per_success_pct": carbon_per_success_pct,
+        "carbon_per_makespan_hour": carbon_per_makespan_hour,
+        "makespan_hours_per_carbon": makespan_hours_per_carbon
     }
 
-def find_earliest_slot(region, requested_cores, state):
-    """Finds the first hour (starting from now) where requested_cores are available."""
-    now = dt.datetime.now().replace(minute=0, second=0, microsecond=0)
-    for h in range(240): # Look ahead up to 10 days
-        slot = (now + dt.timedelta(hours=h)).isoformat()
-        used = state.get(region, {}).get(slot, 0)
-        if (used + requested_cores) <= TOTAL_CORES_PER_REGION: 
-            return now + dt.timedelta(hours=h)
-    return now
-
-
-# def check_conservative_resource_limits(current_state, region, start_hour, path, TOTAL_CORES_PER_REGION):
-#     """
-#     Verifica se a alocação deste caminho respeita uma abordagem conservadora,
-#     não esgotando os recursos que outros caminhos independentes possam vir a precisar.
-#     """
-#     # Definimos um teto máximo conservador (ex: usar no máximo 75% da capacidade total da região)
-#     CONSERVATIVE_CAPFACTOR = 0.75
-#     safe_core_limit = TOTAL_CORES_PER_REGION * CONSERVATIVE_CAPFACTOR
+def find_earliest_slot(region, requested_cores, state, not_before=None, deadline=None):
+    """
+    Finds the first hour >= not_before where requested_cores are available,
+    ensuring the returned slot does not exceed the deadline.
+    Returns None if no available slot satisfies the deadline constraint.
+    """
+    anchor = not_before if not_before else dt.datetime.now()
+    anchor = anchor.replace(minute=0, second=0, microsecond=0, tzinfo=None)
     
-#     # Calcular o offset de tempo sequencial de cada tarefa dentro deste caminho específico
-#     current_offset = start_hour
-#     for pt in path['tasks']:
-#         for h in range(pt['dur']):
-#             # Simular a verificação hora a hora na linha temporal em formato ISO
-#             # Se o estado atual não tiver o registo, o uso é zero
-#             import datetime as dt
-#             ts = (dt.datetime.min + dt.timedelta(hours=current_offset + h)).time().isoformat() # Representação genérica de slot
-            
-#             # Se usar uma string timestamp baseada na submissão original:
-#             # ts = (naive_submission + dt.timedelta(hours=current_offset + h)).isoformat()
-            
-#             current_usage = current_state.get(region, {}).get(ts, 0)
-            
-#             # Se o nosso pedido somado ao uso atual violar o limite seguro/conservador, rejeitamos o slot
-#             if current_usage + pt['cores'] > safe_core_limit:
-#                 return False
-                
-#         current_offset += pt['dur']
-        
-#     return True
+    # If a deadline is provided, strip timezone info to match the anchor format
+    if deadline:
+        deadline = deadline.replace(minute=0, second=0, microsecond=0, tzinfo=None)
 
-def find_globally_greenest_schedule(REGIONS, tasks_metadata, all_regions_intensities, in_memory_state, 
-                                    submission_time, deadline_date, DATA_SIZE_GB, base_ci, source_region=REGIONS[0]):
+    for h in range(240):
+        slot_dt = anchor + dt.timedelta(hours=h)
+        
+        # Check if we have already breached the deadline
+        if deadline and slot_dt > deadline:
+            break
+            
+        slot = slot_dt.isoformat()
+        used = state.get(region, {}).get(slot, 0)
+        if (used + requested_cores) <= CORES_LIMIT:
+            return slot_dt
+            
+    return None  # No valid slot found within the deadline and search window
+
+
+
+def save_chosen_path(batch_label, algorithm, order_run_ids, task_regions,
+                      exec_carbon_g, transfer_carbon_g, extra=None):
     """
-    Finds the absolute greenest schedule using Pre-flight macro filters, Greedy Core Packing,
-    and Look-Ahead Carbon Trend Pruning to eliminate checking suboptimal subsequent slots.
-
-    NOTE: This function is currently NOT called anywhere in the active algorithm paths.
-    Kept here for reference / future use.
+    Persist the ordering/assignment a batch scheduler (Alg4, Oracle) actually
+    chose, so different algorithms' choices for the SAME sub-batch can be
+    diffed offline. batch_label must be shared across algorithms for a given
+    sub-batch (i.e. scenario_label without any algorithm-specific suffix).
     """
-    global_best_impact = float('inf')
-    global_best_manifest = {}
+    record = {
+        "algorithm":          algorithm,
+        "batch_label":        batch_label,
+        "workflow_order":     order_run_ids,      # order workflows were scheduled in
+        "task_regions":       task_regions,        # {"<run_id>::<task_id>": region}
+        "exec_carbon_g":      round(exec_carbon_g, 2),
+        "transfer_carbon_g":  round(transfer_carbon_g, 2),
+        "total_carbon_g":     round(exec_carbon_g + transfer_carbon_g, 2),
+    }
+    if extra:
+        record.update(extra)
 
-    naive_deadline = deadline_date.replace(tzinfo=None)
-    naive_submission = submission_time.replace(tzinfo=None)
-    max_window_hours = int((naive_deadline - naive_submission).total_seconds() // 3600)
+    safe_label = "".join(c if c.isalnum() or c in "._-" else "_" for c in batch_label)
+    out_path = os.path.join(ORDERS_DIR, f"order_{safe_label}_{algorithm}_{int(dt.datetime.now().timestamp())}.json")
+    with open(out_path, "w") as f:
+        json.dump(record, f, indent=2)
+    return out_path
 
-    # 1. Pre-flight region filtering to keep branching small
-    filtered_regions = []
-    home_intensities = all_regions_intensities.get(source_region, {})
-    home_avg_ci = sum(home_intensities.values()) / len(home_intensities) if home_intensities else base_ci
-    total_core_hours = sum(t['dur'] * t['cores'] for t in tasks_metadata)
-
-    for r in REGIONS:
-        if r == source_region:
-            filtered_regions.append(r)
-            continue
-        intensities = all_regions_intensities.get(r, {})
-        if not intensities:
-            continue
-        remote_avg_ci = sum(intensities.values()) / len(intensities)
-        _, transfer_carbon_penalty = calculate_transfer_penalty(r, DATA_SIZE_GB)
-        estimated_operational_savings = (home_avg_ci - remote_avg_ci) * total_core_hours
-        
-        if estimated_operational_savings > transfer_carbon_penalty:
-            filtered_regions.append(r)
-
-    # Pre-calculate suffix core-hours for remaining tasks to make look-ahead fast
-    # suffix_remaining_core_hours[i] tells us exactly how many core-hours are left from task i onwards
-    task_core_hours = [t['dur'] * t['cores'] for t in tasks_metadata]
-    suffix_remaining_core_hours = [sum(task_core_hours[i:]) for i in range(len(task_core_hours))] + [0]
-
-    def dfs(task_idx, current_hour_offset, current_region, accumulated_carbon, current_manifest, current_state):
-        nonlocal global_best_impact, global_best_manifest
-        
-        # All tasks successfully mapped
-        if task_idx >= len(tasks_metadata):
-            if accumulated_carbon < global_best_impact:
-                global_best_impact = accumulated_carbon
-                global_best_manifest = copy.deepcopy(current_manifest)
-            return
-
-        # ---------------------------------------------------------------------
-        # LOOK-AHEAD CARBON TREND PRUNING
-        # ---------------------------------------------------------------------
-        if current_region:
-            intensities = all_regions_intensities.get(current_region, {})
-            # Find the absolute best (lowest) carbon intensity remaining in the timeline
-            # from our current hour offset up to the very end of the deadline window
-            remaining_intensities = [
-                v for k, v in intensities.items() 
-                if int((k.replace(tzinfo=None) - naive_submission).total_seconds() // 3600) >= current_hour_offset
-            ]
-            
-            if remaining_intensities:
-                absolute_best_remaining_ci = min(remaining_intensities)
-                remaining_workload = suffix_remaining_core_hours[task_idx]
-                
-                # Theoretical absolute lowest carbon this branch could possibly achieve
-                best_possible_future_impact = accumulated_carbon + (absolute_best_remaining_ci * remaining_workload)
-                
-                # If even this impossible best-case scenario can't beat our champion, abort!
-                if best_possible_future_impact >= global_best_impact:
-                    return
-        elif accumulated_carbon >= global_best_impact:
-            return
-
-        t = tasks_metadata[task_idx]
-
-        # ---------------------------------------------------------------------
-        # DECISION 1: Try to schedule and greedily pack tasks at current offset
-        # ---------------------------------------------------------------------
-        for target_region in filtered_regions:
-            intensities = all_regions_intensities.get(target_region, {})
-
-            if current_region and target_region != current_region:
-                time_penalty, carbon_penalty = calculate_transfer_penalty(target_region, DATA_SIZE_GB)
-            else:
-                time_penalty, carbon_penalty = 0, 0
-
-            actual_running_offset = current_hour_offset + time_penalty
-            base_t = tasks_metadata[task_idx]
-
-            if actual_running_offset + base_t['dur'] > max_window_hours:
-                continue
-
-            t_start = naive_submission + dt.timedelta(hours=actual_running_offset)
-            t_lookup = t_start.replace(minute=0, second=0, microsecond=0)
-
-            # Greedy Multi-Task Packing
-            packed_tasks = []
-            accumulated_cores_for_block = 0
-            
-            for lookahead_idx in range(task_idx, len(tasks_metadata)):
-                cand_t = tasks_metadata[lookahead_idx]
-                can_fit_cores = True
-                
-                for h in range(max(base_t['dur'], cand_t['dur'])):
-                    ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
-                    current_usage = current_state.get(target_region, {}).get(ts, 0)
-                    if current_usage + accumulated_cores_for_block + cand_t['cores'] > TOTAL_CORES_PER_REGION:
-                        can_fit_cores = False
-                        break
-                
-                if actual_running_offset + max(base_t['dur'], cand_t['dur']) > max_window_hours:
-                    can_fit_cores = False
-
-                if can_fit_cores:
-                    packed_tasks.append(cand_t)
-                    accumulated_cores_for_block += cand_t['cores']
-                else:
-                    break
-
-            if not packed_tasks:
-                continue
-
-            # Commit Packed Batch
-            total_batch_carbon = 0
-            for pt in packed_tasks:
-                pt_ci = intensities.get(min(intensities.keys(), key=lambda d: abs(d.replace(tzinfo=None) - t_lookup)), 400)
-                pt_aware_carbon = pt_ci * (pt['dur'] * pt['cores'])
-                total_batch_carbon += pt_aware_carbon
-                pt_baseline_carbon = base_ci * (pt['dur'] * pt['cores'])
-
-                current_manifest[pt['id']] = {
-                    "start": t_lookup.isoformat(), "dur": pt['dur'], "region": target_region, "cores": pt['cores'],
-                    "pt_ci": round(base_ci, 2), "target_ci": round(pt_ci, 2),
-                    "saved_g": round(pt_baseline_carbon - pt_aware_carbon, 2),
-                    "pct": round(((pt_baseline_carbon - pt_aware_carbon) / pt_baseline_carbon * 100), 1) if pt_baseline_carbon > 0 else 0
-                }
-
-                for h in range(pt['dur']):
-                    ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
-                    if target_region not in current_state: 
-                        current_state[target_region] = {}
-                    current_state[target_region][ts] = current_state[target_region].get(ts, 0) + pt['cores']
-
-            # Recurse forward
-            dfs(
-                task_idx = task_idx + len(packed_tasks), 
-                current_hour_offset = actual_running_offset,
-                current_region = target_region,
-                accumulated_carbon = accumulated_carbon + total_batch_carbon + carbon_penalty, 
-                current_manifest = current_manifest, 
-                current_state = current_state
-            )
-
-            # Backtrack
-            for pt in packed_tasks:
-                for h in range(pt['dur']):
-                    ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
-                    current_state[target_region][ts] -= pt['cores']
-                if pt['id'] in current_manifest:
-                    del current_manifest[pt['id']]
-
-        # ---------------------------------------------------------------------
-        # DECISION 2: Shift execution timeline baseline forward 1 hour
-        # ---------------------------------------------------------------------
-        if current_hour_offset + 1 < max_window_hours:
-            dfs(task_idx, current_hour_offset + 1, current_region, accumulated_carbon, current_manifest, current_state)
-
-    initial_state = copy.deepcopy(in_memory_state)
-    dfs(task_idx=0, current_hour_offset=0, current_region=None, accumulated_carbon=0.0, current_manifest={}, current_state=initial_state)
-
-    winning_region = global_best_manifest.get("T1", {}).get("region", source_region) if global_best_manifest else source_region
-    return global_best_impact, global_best_manifest, winning_region
 
 def update_scratchpad(state, region, start_dt, duration, cores):
     """
@@ -443,45 +306,7 @@ def update_scratchpad(state, region, start_dt, duration, cores):
         
     return state
 
-def get_estimated_duration(task_id, sla_level):
-    if not os.path.exists(HISTORY_FILE):
-        return 1.0  # default: 1 hour
-    
-    with open(HISTORY_FILE, 'r') as f:
-        history = json.load(f)
-    
-    # Get history for task or use DEFAULT key
-    data = history.get(task_id, history.get("DEFAULT", [60]))
-    
-    # Ensure we don't return 0
-    val = np.percentile(data, sla_level)
-    return max(val, 1) / 60
 
-# def calculate_workflow_savings(plan_file, traces):
-#     with open(plan_file, 'r') as f:
-#         plan = json.load(f)
-    
-#     total_baseline_carbon = 0
-#     total_aware_carbon = 0
-    
-#     for task in plan['tasks']:
-#         # 1. Baseline: Running in PT at the moment of submission
-#         pt_intensity = traces['PT'][plan['submission_time']] 
-#         baseline = task['energy_usage'] * pt_intensity
-        
-#         # 2. Aware: Running in the chosen Region at the chosen Start Time
-#         target_region = task['selected_region']
-#         target_time = task['selected_start_time']
-#         aware_intensity = traces[target_region][target_time]
-#         aware = task['energy_usage'] * aware_intensity
-        
-#         total_baseline_carbon += baseline
-#         total_aware_carbon += aware
-
-#     saved = total_baseline_carbon - total_aware_carbon
-#     reduction_pct = (saved / total_baseline_carbon) * 100
-    
-#     return saved, reduction_pct
 
 def calculate_transfer_penalty(target_region, data_size_gb, source_region=REGIONS[0]):
     """
@@ -542,328 +367,495 @@ def save_cluster_state(state_dict, file_path=CLUSTER_FILE):
     except IOError as e:
         print(f"Error saving cluster state: {e}")
 
-def get_dynamic_critical_path(tasks_metadata, edges, sla_level):
+def get_dynamic_critical_path(tasks_metadata, edges=None, sla_level=None):
     """
-    Calculates the longest path through the workflow using Kahn's algorithm,
-    adjusting task durations based on historical data and the requested SLA.
-    """
-    # 1. Get SLA-adjusted durations for all tasks
-    durations = {t['id']: get_estimated_duration(t['id'], sla_level) for t in tasks_metadata}
+    Calculates the longest critical path length through the workflow using Kahn's algorithm,
+    deriving edges directly from each task's 'depends_on' list and using 'dur' for weights.
     
-    # If there are no edges, the workflow is just parallel tasks. The critical path is the longest single task.
-    if not edges:
-        return max(durations.values()) if durations else 1.0
+    Arguments 'edges' and 'sla_level' are retained with defaults to prevent breaking 
+    upstream signatures, but are bypassed in favor of internal task properties.
+    """
+    if not tasks_metadata:
+        return 0.0
 
-    # 2. Build the graph mapping
+    # 1. Map durations directly from the task dictionaries
+    durations = {t['id']: t.get('dur', 1.0) for t in tasks_metadata}
+    
+    # 2. Initialize the forward adjacency graph (Parent -> Children) and In-Degrees
     graph = {t['id']: [] for t in tasks_metadata}
     in_degree = {t['id']: 0 for t in tasks_metadata}
     
-    for edge in edges:
-        # Check if edge is (source, target) or (type, source, target)
-        if len(edge) == 2:
-            u, v = edge
-        elif len(edge) == 3:
-            _, u, v = edge # Ignore the first item (the label)
-        else:
-            print(f"[WARNING] Skipping malformed edge: {edge}")
-            continue
+    # 3. Build the graph relationships using 'depends_on' (which defines parents)
+    for t in tasks_metadata:
+        child_id = t['id']
+        parents = t.get('depends_on', [])
+        
+        for parent_id in parents:
+            # Safety check: verify parent exists in the metadata set
+            if parent_id in graph:
+                graph[parent_id].append(child_id)
+                in_degree[child_id] += 1
 
-        if u in graph and v in in_degree:
-            graph[u].append(v)
-            in_degree[v] += 1
-            
-    # 3. Find the critical path
+    # 4. Kahn's Algorithm / Dynamic Programming to find the longest path
     earliest_start = {t['id']: 0 for t in tasks_metadata}
+    
+    # Queue up root nodes (tasks with no incoming dependencies)
     queue = [t['id'] for t in tasks_metadata if in_degree[t['id']] == 0]
     
     while queue:
-        u = queue.pop(0)
-        for v in graph[u]:
+        u = queue.pop(0)  # Current parent node
+        
+        for v in graph[u]:  # Loop through child nodes
+            # A child cannot start until its parent finishes execution
             earliest_start[v] = max(earliest_start[v], earliest_start[u] + durations[u])
+            
             in_degree[v] -= 1
             if in_degree[v] == 0:
                 queue.append(v)
                 
-    # The critical path length is the maximum of (start_time + duration) across all nodes
+    # 5. Total critical path length is the maximum (start_time + duration) across all nodes
     cp_length = max(earliest_start[n] + durations[n] for n in earliest_start)
     return cp_length
 
-def plan_baseline_A(run_id, submission, deadline, tasks, edges, in_memory_state):
-    """Baseline A: Immediate Schedule (Earliest Start across all regions)"""
-    print(f"[BASELINE A] Planning {run_id} for immediate execution...")
-    plan = {}
-    
-    sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(submission)
-    dl_dt = deadline if isinstance(deadline, dt.datetime) else dt.datetime.fromisoformat(deadline)
-    
-    # Ensure they are timezone-naive for comparison with our scratchpad
-    sub_dt = sub_dt.replace(tzinfo=None)
-    dl_dt = dl_dt.replace(tzinfo=None)
+def _apply_late_carbon_penalty(plan, all_traces, stats, multiplier):
+    """
+    Recalculates total_carbon by applying the penalty multiplier to hours
+    belonging to tasks flagged as scheduled_late. Returns an updated stats dict.
+    calculate_standardized_stats doesn't know about scheduled_late, so this
+    is a lightweight post-processing pass rather than duplicating its logic.
+    """
+    POWER_FACTOR = 0.2
+    penalized_carbon = 0.0
 
-    best_region = None
+    for tid, tdata in plan.items():
+        is_late = tdata.get('scheduled_late', False)
+        mult = multiplier if is_late else 1.0
+        start_dt = dt.datetime.fromisoformat(tdata['start']).replace(tzinfo=None)
+        reg = tdata['region']
+
+        for h in range(tdata['dur']):
+            hour_obj = start_dt + dt.timedelta(hours=h)
+            intensity = all_traces.get(reg, {}).get(hour_obj, 400)
+            penalized_carbon += (tdata['cores'] * POWER_FACTOR) * intensity * mult
+
+    stats['total_carbon'] = round(penalized_carbon, 2)
+    stats['total_carbon_with_transfer'] = round(
+        penalized_carbon + stats.get('total_transfer_carbon', 0.0), 2
+    )
+    return stats
+
+def plan_baseline_A(run_id, submission, deadline, tasks, edges, in_memory_state, source_region=None):
+    """Baseline A: Immediate Schedule (Earliest Start across all regions)"""
+    if source_region is None:
+        print(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.")
+        source_region = REGIONS[0]
+
+    print(f"[BASELINE A] Planning {run_id} originating from {source_region}...")
+    plan = {}
+
+    sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(submission)
+    dl_dt  = deadline   if isinstance(deadline,  dt.datetime) else dt.datetime.fromisoformat(deadline)
+    sub_dt = sub_dt.replace(tzinfo=None)
+    dl_dt  = dl_dt.replace(tzinfo=None)
+
+    
+
+    task_map      = {t['id']: t for t in tasks}
+    finish_times  = {}
+    max_end_time  = dl_dt  # tracks the latest finish across all tasks
+
+    all_traces = {reg: load_carbon_data(reg, sub_dt, dl_dt) for reg in REGIONS}
 
     for task in tasks:
-        best_start = None
-        best_region = REGIONS[0]
-        
+        parent_finish = max(
+            (finish_times[dep] for dep in task.get("depends_on", []) if dep in finish_times),
+            default=sub_dt
+        )
+
+        data_size = sum(
+            task_map[p_id].get('output_size_gb', DATA_SIZE_GB)
+            for p_id in task.get('depends_on', [])
+            if p_id in task_map
+        ) or DATA_SIZE_GB
+
+        best_start  = None
+        best_region = None
+
+        # ── Phase 1: try to find a slot within the deadline ────────────────────
         for reg in REGIONS:
-            earliest_for_reg = find_earliest_slot(reg, task['cores'], in_memory_state)
-            if best_start is None or earliest_for_reg < best_start:
-                best_start = earliest_for_reg
-                best_region = reg
-        
-        plan[task['id']] = {
-            "region": best_region, "start": best_start.isoformat(),
-            "dur": task['dur'], "cores": task['cores']
+            time_penalty, _ = calculate_transfer_penalty(reg, data_size, source_region=source_region)
+            adjusted_ready_time = parent_finish + dt.timedelta(hours=time_penalty)
+
+            slot = find_earliest_slot(reg, task["cores"], in_memory_state,
+                                      not_before=adjusted_ready_time, deadline=dl_dt)
+            if slot is not None:
+                if best_start is None or slot < best_start:
+                    best_start  = slot
+                    best_region = reg
+
+        is_late = False
+
+        # ── Phase 2: fallback past deadline (Uncapped Horizon up to 30 days out) ────────────────
+        if best_start is None:
+            print(f"[BASELINE A] Task {task['id']} over core limit inside deadline. Scheduling late...")
+            is_late = True
+            
+            # Use an extended lookahead deadline limit (720 hours)
+            extended_deadline = parent_finish + dt.timedelta(hours=720)
+            for reg in REGIONS:
+                time_penalty, _ = calculate_transfer_penalty(reg, data_size, source_region=source_region)
+                adjusted_ready_time = parent_finish + dt.timedelta(hours=time_penalty)
+
+                slot = find_earliest_slot(reg, task["cores"], in_memory_state,
+                                          not_before=adjusted_ready_time, deadline=extended_deadline)
+                if slot is not None:
+                    if best_start is None or slot < best_start:
+                        best_start  = slot
+                        best_region = reg
+
+            # Absolute last resort fallback
+            if best_start is None:
+                best_start  = parent_finish
+                best_region = source_region
+
+        finish_times[task["id"]] = best_start + dt.timedelta(hours=task["dur"])
+        max_end_time = max(max_end_time, finish_times[task["id"]])
+
+        _, task_transfer_carbon = calculate_transfer_penalty(best_region, data_size, source_region=source_region)
+
+        plan[task["id"]] = {
+            "region":            best_region,
+            "start":             best_start.isoformat(),
+            "dur":               task["dur"],
+            "cores":             task["cores"],
+            "transfer_carbon_g": round(task_transfer_carbon, 2),
+            "scheduled_late":    is_late,
+            "carbon_penalty_multiplier": DEADLINE_PENALTY_MULTIPLIER if is_late else 1.0,
         }
-        in_memory_state = update_scratchpad(in_memory_state, best_region, best_start, task['dur'], task['cores'])
+        in_memory_state = update_scratchpad(
+            in_memory_state, best_region, best_start, task["dur"], task["cores"]
+        )
 
     save_cluster_state(in_memory_state)
 
-    # Visualization
-    all_traces = {reg: load_carbon_data(reg, sub_dt, dl_dt) for reg in REGIONS}
-    stats = calculate_standardized_stats(plan, all_traces, sub_dt, len(tasks))
+    stats_traces = all_traces
+    if max_end_time > dl_dt:
+        stats_traces = {reg: load_carbon_data(reg, sub_dt, max_end_time) for reg in REGIONS}
+
+    stats = calculate_standardized_stats(plan, stats_traces, sub_dt, len(tasks), deadline=dl_dt)
+    stats = _apply_late_carbon_penalty(plan, stats_traces, stats, DEADLINE_PENALTY_MULTIPLIER)
+
     plot_optimization_window_heatmap(
-        plan, 
-        all_traces, 
-        sub_dt, 
-        dl_dt, 
+        plan, stats_traces, sub_dt, max_end_time,
         plot_name=f"baseline_A_{run_id}",
         stats=stats
     )
-    plan_path = get_safe_plan_path(run_id)
-    with open(plan_path, 'w') as f:
+
+    plan_path = os.path.join(PLAN_DIR, f"plan_{run_id}.json")
+    with open(plan_path, "w") as f:
         json.dump(plan, f)
-    
-    print(f"[BASELINE A] Plan saved to {plan_path}")
+
     return plan
 
-def plan_baseline_B(run_id, submission, deadline, tasks, edges, in_memory_state):
-    """
-    Baseline B: Local-First (Portugal). 
-    Schedule in Portugal if deadline allows; otherwise, migrate to the 
-    region with the earliest possible start time.
-    """
-    print(f"[BASELINE B] Planning {run_id}...")
+def plan_baseline_B(run_id, submission, deadline, tasks, edges, in_memory_state, source_region=None):
+    """Baseline B: Local-First (Default Origin Location)"""
+    if source_region is None:
+        print(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.")
+        source_region = REGIONS[0]
+
+    print(f"[BASELINE B] Planning {run_id} local to region {source_region}...")
     plan = {}
-    local_reg = REGIONS[0]  
-    
-    # 1. Defensive Date Parsing
+
     sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(str(submission))
-    dl_dt = deadline if isinstance(deadline, dt.datetime) else dt.datetime.fromisoformat(str(deadline))
-    
+    dl_dt  = deadline   if isinstance(deadline,  dt.datetime) else dt.datetime.fromisoformat(str(deadline))
     sub_dt = sub_dt.replace(tzinfo=None)
-    dl_dt = dl_dt.replace(tzinfo=None)
+    dl_dt  = dl_dt.replace(tzinfo=None)
 
-    # 2. Process each task individually
+    DEADLINE_PENALTY_MULTIPLIER = 1.5
+    task_map = {t['id']: t for t in tasks}
+    finish_times = {}
+    max_end_time = dl_dt
+
+    all_traces = {reg: load_carbon_data(reg, sub_dt, dl_dt) for reg in REGIONS}
+
     for task in tasks:
-        # Check when this specific task can start in Portugal
-        start_portugal = find_earliest_slot(local_reg, task['cores'], in_memory_state)
-        finish_portugal = start_portugal + dt.timedelta(hours=task['dur'])
+        parent_finish = max(
+            (finish_times[dep] for dep in task.get("depends_on", []) if dep in finish_times),
+            default=sub_dt
+        )
 
-        # If it can finish in Portugal before the deadline, stay there.
-        if finish_portugal <= dl_dt:
-            chosen_reg = local_reg
-            chosen_start = start_portugal
+        data_size = sum(
+            task_map[p_id].get('output_size_gb', DATA_SIZE_GB)
+            for p_id in task.get('depends_on', [])
+            if p_id in task_map
+        ) or DATA_SIZE_GB
+
+        best_start = None
+        chosen_reg = None
+
+        # ── Phase 1a: Try Local Region within Deadline ──
+        slot_local = find_earliest_slot(source_region, task["cores"], in_memory_state,
+                                        not_before=parent_finish, deadline=dl_dt)
+        if slot_local is not None:
+            best_start = slot_local
+            chosen_reg = source_region
         else:
-            # Portugal is too busy! Finding the region that can start it the SOONEST.
-            print(f"[BASELINE B] Task {task['id']} missed Portugal deadline. Migrating...")
-            
-            best_start = start_portugal
-            chosen_reg = local_reg
+            # ── Phase 1b: Try External Regions within Deadline ──
+            for reg in REGIONS:
+                if reg == source_region:
+                    continue
+                time_penalty, _ = calculate_transfer_penalty(reg, data_size, source_region=source_region)
+                adjusted_ready_time = parent_finish + dt.timedelta(hours=time_penalty)
+                earliest_elsewhere = find_earliest_slot(reg, task["cores"], in_memory_state,
+                                                        not_before=adjusted_ready_time, deadline=dl_dt)
+                if earliest_elsewhere is not None:
+                    if best_start is None or earliest_elsewhere < best_start:
+                        best_start = earliest_elsewhere
+                        chosen_reg = reg
+
+        is_late = False
+
+        # ── Phase 2: Fallback Past Deadline (Up to 30 days out) ──
+        if best_start is None:
+            print(f"[BASELINE B] Task {task['id']} over core limit inside deadline. Scheduling late...")
+            is_late = True
+            extended_deadline = parent_finish + dt.timedelta(hours=720)
             
             for reg in REGIONS:
-                earliest_elsewhere = find_earliest_slot(reg, task['cores'], in_memory_state)
-                if earliest_elsewhere < best_start:
-                    best_start = earliest_elsewhere
-                    chosen_reg = reg
-            
-            chosen_start = best_start
+                time_penalty, _ = calculate_transfer_penalty(reg, data_size, source_region=source_region)
+                adjusted_ready_time = parent_finish + dt.timedelta(hours=time_penalty)
+                earliest_elsewhere = find_earliest_slot(reg, task["cores"], in_memory_state,
+                                                        not_before=adjusted_ready_time, deadline=extended_deadline)
+                if earliest_elsewhere is not None:
+                    if best_start is None or earliest_elsewhere < best_start:
+                        best_start = earliest_elsewhere
+                        chosen_reg = reg
 
-        # 3. Save to plan
-        plan[task['id']] = {
-            "region": chosen_reg,
-            "start": chosen_start.isoformat(),
-            "dur": task['dur'],
-            "cores": task['cores']
+            if best_start is None:
+                best_start = parent_finish
+                chosen_reg = source_region
+
+        finish_times[task["id"]] = best_start + dt.timedelta(hours=task["dur"])
+        max_end_time = max(max_end_time, finish_times[task["id"]])
+
+        _, task_transfer_carbon = calculate_transfer_penalty(chosen_reg, data_size, source_region=source_region)
+
+        plan[task["id"]] = {
+            "region":            chosen_reg,
+            "start":             best_start.isoformat(),
+            "dur":               task["dur"],
+            "cores":             task["cores"],
+            "transfer_carbon_g": round(task_transfer_carbon, 2),
+            "scheduled_late":    is_late,
+            "carbon_penalty_multiplier": DEADLINE_PENALTY_MULTIPLIER if is_late else 1.0,
         }
+        in_memory_state = update_scratchpad(
+            in_memory_state, chosen_reg, best_start, task["dur"], task["cores"]
+        )
 
-        in_memory_state = update_scratchpad(in_memory_state, chosen_reg, chosen_start, task['dur'], task['cores'])
-
-    # 5. Commit decisions to disk and visualize
     save_cluster_state(in_memory_state)
-    
-    all_traces = {reg: load_carbon_data(reg, sub_dt, dl_dt) for reg in REGIONS}
-    stats = calculate_standardized_stats(plan, all_traces, sub_dt, len(tasks))
-    
-    plot_optimization_window_heatmap(plan, all_traces, sub_dt, dl_dt, plot_name=f"baseline_B_{run_id}", stats=stats)
 
-    plan_path = get_safe_plan_path(run_id)
-    with open(plan_path, 'w') as f:
+    stats_traces = all_traces
+    if max_end_time > dl_dt:
+        stats_traces = {reg: load_carbon_data(reg, sub_dt, max_end_time) for reg in REGIONS}
+
+    stats = calculate_standardized_stats(plan, stats_traces, sub_dt, len(tasks), deadline=dl_dt)
+    stats = _apply_late_carbon_penalty(plan, stats_traces, stats, DEADLINE_PENALTY_MULTIPLIER)
+
+    plot_optimization_window_heatmap(
+        plan, stats_traces, sub_dt, max_end_time,
+        plot_name=f"baseline_B_{run_id}",
+        stats=stats
+    )
+
+    plan_path = os.path.join(PLAN_DIR, f"plan_{run_id}.json")
+    with open(plan_path, "w") as f:
         json.dump(plan, f)
 
     return plan
 
+def plan_atomic(run_id, submission, deadline, tasks, edges, in_memory_state, source_region=None):
+    if source_region is None:
+        print(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.")
+        source_region = REGIONS[0]
 
-
-def plan_baseline_atomic(run_id, submission, deadline, tasks, edges, in_memory_state):
-    """
-    Baseline C: Black-Box Atomic Scheduler (Thread-Safe and Cluster-Capacity Aware).
-    Treats the workflow as a single un-splittable block. Verifies that cluster 
-    resources are continuously available for the full duration before booking.
-    """
-    print(f"[BASELINE ATOMIC] Planning {run_id} with full capacity verification...")
+    print(f"[BASELINE ATOMIC] Planning continuous block for {run_id} from {source_region}...")
     plan = {}
-    
-    sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(str(submission))
-    dl_dt = deadline if isinstance(deadline, dt.datetime) else dt.datetime.fromisoformat(str(deadline))
-    sub_dt = sub_dt.replace(tzinfo=None)
-    dl_dt = dl_dt.replace(tzinfo=None)
 
-    total_duration = sum(t['dur'] for t in tasks)
+    sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(str(submission))
+    dl_dt  = deadline   if isinstance(deadline,  dt.datetime) else dt.datetime.fromisoformat(str(deadline))
+    sub_dt = sub_dt.replace(tzinfo=None)
+    dl_dt  = dl_dt.replace(tzinfo=None)
+
+    total_duration   = sum(t['dur'] for t in tasks)
     max_cores_needed = max(t['cores'] for t in tasks)
-    
-    best_start = None
-    best_region = None
+    task_map         = {t['id']: t for t in tasks}
+
+    # Penalty multiplier applied to carbon cost for hours scheduled past the
+    # deadline — represents the "emergency capacity" cost of missing the SLA.
+    DEADLINE_PENALTY_MULTIPLIER = 1.5
+
+    best_start            = None
+    best_region           = None
     lowest_average_carbon = float('inf')
+    best_is_late          = False
 
     all_traces = {reg: load_carbon_data(reg, sub_dt, dl_dt) for reg in REGIONS}
 
+    # ── 1. Try to find a valid block within the deadline (unchanged) ──────────
     for reg in REGIONS:
-        # Find the absolute earliest the cluster can accept the FIRST task
-        earliest_possible_start = find_earliest_slot(reg, max_cores_needed, in_memory_state)
+        time_penalty, _ = calculate_transfer_penalty(reg, DATA_SIZE_GB, source_region=source_region)
+        adjusted_sub_time = sub_dt + dt.timedelta(hours=time_penalty)
+
+        if adjusted_sub_time >= dl_dt:
+            continue
+
+        earliest_possible_start = find_earliest_slot(
+            reg, max_cores_needed, in_memory_state,
+            not_before=adjusted_sub_time, deadline=dl_dt
+        )
+        if earliest_possible_start is None:
+            continue
+
         available_hours = int((dl_dt - earliest_possible_start).total_seconds() / 3600)
-        
-        for offset in range(available_hours - total_duration + 1):
+
+        for offset in range(max(0, available_hours - total_duration + 1)):
             candidate_start = earliest_possible_start + dt.timedelta(hours=offset)
-            
-            block_is_valid = True
+
+            if candidate_start + dt.timedelta(hours=total_duration) > dl_dt:
+                break
+
+            block_is_valid       = True
             current_block_carbon = 0.0
-            
-            for h in range(total_duration):
-                hour_obj = candidate_start + dt.timedelta(hours=h)
-                hour_str = hour_obj.isoformat()
-                
-                # Check how many cores are already used in this region at this hour
-                cores_used_already = in_memory_state.get(reg, {}).get(hour_str, 0)
-                
-                # If adding our needed cores exceeds cluster capacity, this entire block is invalid
-                if cores_used_already + max_cores_needed > TOTAL_CORES_PER_REGION:
-                    block_is_valid = False
-                    break # Stop checking this candidate slot
-                
-                # If space is valid, accumulate the carbon metric for this hour
-                intensity = all_traces.get(reg, {}).get(hour_obj, 400) 
-                current_block_carbon += (max_cores_needed * 0.2) * intensity
-            
-            # If the full block fits and saves more carbon than our best find, keep it
+            current_task_start   = candidate_start
+
+            for task in tasks:
+                task_transfer_carbon = 0.0
+                for p_id in task.get('depends_on', []):
+                    parent_task = task_map.get(p_id)
+                    if parent_task:
+                        data_size = parent_task.get('output_size_gb', DATA_SIZE_GB)
+                        _, t_carbon = calculate_transfer_penalty(
+                            target_region=reg, source_region=source_region, data_size_gb=data_size
+                        )
+                        task_transfer_carbon += t_carbon
+                current_block_carbon += task_transfer_carbon
+
+                for h in range(task['dur']):
+                    hour_obj = current_task_start + dt.timedelta(hours=h)
+                    hour_str = hour_obj.isoformat()
+                    cores_used_already = in_memory_state.get(reg, {}).get(hour_str, 0)
+                    if cores_used_already + task['cores'] > CORES_LIMIT:
+                        block_is_valid = False
+                        break
+                    intensity = all_traces.get(reg, {}).get(hour_obj, 400)
+                    current_block_carbon += (task['cores'] * 0.2) * intensity
+
+                if not block_is_valid:
+                    break
+                current_task_start += dt.timedelta(hours=task['dur'])
+
             if block_is_valid and current_block_carbon < lowest_average_carbon:
                 lowest_average_carbon = current_block_carbon
-                best_start = candidate_start
-                best_region = reg
+                best_start   = candidate_start
+                best_region  = reg
+                best_is_late = False
 
-    # 4. Fallback: If no continuous slot fits safely, force immediate execution at earliest slot
+    # ── 2. Fallback: schedule past deadline with a carbon penalty ─────────────
+    # No valid block found within the deadline window — search past it instead
+    # of failing. Carbon cost for these hours is multiplied by the penalty.
+    # ── 2. Fallback: schedule past deadline with a carbon penalty ─────────────
     if best_start is None:
-        print("[WARNING] No valid continuous block fits capacity limits. Forcing earliest execution.")
-        best_region = REGIONS[0]
-        best_start = find_earliest_slot(best_region, max_cores_needed, in_memory_state)
+        print(f"[ATOMIC] No valid block within deadline for {run_id}. "
+              f"Staying in {source_region} and scheduling late (no region change — "
+              f"transfer time would make it even later).")
 
-    # 5. Build the final plan mapping ALL tasks back-to-back
+        # FIX: only search source_region — switching regions adds transfer time
+        # on top of an already-overdue schedule, making things strictly worse
+        earliest_possible_start = find_earliest_slot(
+            source_region, max_cores_needed, in_memory_state,
+            not_before=sub_dt, deadline=None
+        )
+
+        if earliest_possible_start is not None:
+            candidate_start = earliest_possible_start
+            late_window_end = candidate_start + dt.timedelta(hours=total_duration + 1)
+            late_traces = load_carbon_data(source_region, candidate_start, late_window_end)
+
+            block_is_valid = True
+            current_block_carbon = 0.0
+            current_task_start = candidate_start
+
+            for task in tasks:
+                for h in range(task['dur']):
+                    hour_obj = current_task_start + dt.timedelta(hours=h)
+                    hour_str = hour_obj.isoformat()
+                    cores_used_already = in_memory_state.get(source_region, {}).get(hour_str, 0)
+                    if cores_used_already + task['cores'] > CORES_LIMIT:
+                        block_is_valid = False
+                        break
+                    intensity = late_traces.get(hour_obj, 400)
+                    current_block_carbon += (task['cores'] * 0.2) * intensity * DEADLINE_PENALTY_MULTIPLIER
+                if not block_is_valid:
+                    break
+                current_task_start += dt.timedelta(hours=task['dur'])
+
+            if block_is_valid:
+                best_start  = candidate_start
+                best_region = source_region
+                best_is_late = True
+
+        # Absolute last resort
+        if best_start is None:
+            print(f"[ATOMIC] Last resort: forcing {run_id} to submission time in {source_region}.")
+            best_region  = source_region
+            best_start   = sub_dt
+            best_is_late = True
+
+    # ── 3. Book all tasks back-to-back from best_start ─────────────────────────
     current_task_start = best_start
     for task in tasks:
+        task_transfer_carbon = 0.0
+        for p_id in task.get('depends_on', []):
+            parent_task = task_map.get(p_id)
+            if parent_task:
+                data_size = parent_task.get('output_size_gb', DATA_SIZE_GB)
+                _, t_carbon = calculate_transfer_penalty(
+                    target_region=best_region, source_region=source_region, data_size_gb=data_size
+                )
+                task_transfer_carbon += t_carbon
+
         plan[task['id']] = {
-            "region": best_region,
-            "start": current_task_start.isoformat(),
-            "dur": task['dur'],
-            "cores": task['cores']
+            "region":            best_region,
+            "start":             current_task_start.isoformat(),
+            "dur":               task['dur'],
+            "cores":             task['cores'],
+            "transfer_carbon_g": round(task_transfer_carbon, 2),
+            "scheduled_late":    best_is_late,  # flag for transparency in the manifest
         }
-        
-        # Sequentially book the state for each task hour
         in_memory_state = update_scratchpad(
-            in_memory_state, 
-            best_region, 
-            current_task_start, 
-            task['dur'], 
-            task['cores']
+            in_memory_state, best_region, current_task_start, task['dur'], task['cores']
         )
         current_task_start += dt.timedelta(hours=task['dur'])
 
-    # 6. Post-processing, stats, saving, and plotting
     save_cluster_state(in_memory_state)
-    stats = calculate_standardized_stats(plan, all_traces, sub_dt, len(tasks))
-    
+
+    # Use extended traces for stats if scheduled late, so the heatmap window
+    # actually covers the hours the plan occupies
+    stats_window_end = max(dl_dt, current_task_start)
+    stats_traces = {reg: load_carbon_data(reg, sub_dt, stats_window_end) for reg in REGIONS}
+    stats = calculate_standardized_stats(plan, stats_traces, sub_dt, len(tasks), deadline=dl_dt)
+
     plot_optimization_window_heatmap(
-        plan, all_traces, sub_dt, dl_dt, 
-        plot_name=f"baseline_atomic_{run_id}", stats=stats
+        plan, stats_traces, sub_dt, stats_window_end,
+        plot_name=f"carbon_atomic_{run_id}", stats=stats
     )
 
     plan_path = get_safe_plan_path(run_id)
     with open(plan_path, 'w') as f:
         json.dump(plan, f, indent=4)
-        
+
     return plan
-
-# def preprocess_carbon_to_rle_buckets(all_regions_intensities, REGIONS, max_window_hours):
-#     """
-#     Dynamically normalizes carbon thresholds for each region based on local min/max 
-#     intensity bounds, then applies Run-Length Encoding (RLE) to capture clean intervals.
-#     """
-#     rle_index = {r: {"DARK_GREEN": [], "LIGHT_GREEN": [], "YELLOW": [], "DIRTY_RED": []} for r in REGIONS}
-
-#     for r in REGIONS:
-#         intensities = all_regions_intensities.get(r, {})
-#         if not intensities:
-#             continue
-
-#         sorted_ts = sorted(intensities.keys())
-#         timeline = [intensities[ts] for ts in sorted_ts]
-
-#         # Extract active values inside our planning horizon to establish the normalization baseline
-#         active_values = timeline[:max_window_hours] if len(timeline) >= max_window_hours else timeline
-#         if not active_values:
-#             continue
-
-#         current_bucket = None
-#         current_start = 0
-#         current_length = 0
-
-#         for hour_offset in range(max_window_hours):
-#             if hour_offset < len(timeline):
-#                 ci_val = timeline[hour_offset]
-#             else:
-#                 ci_val = timeline[-1] if timeline else 400
-
-#             if ci_val <= 150:
-#                 bucket_type = "DARK_GREEN"
-#             elif ci_val <= 300:
-#                 bucket_type = "LIGHT_GREEN"
-#             elif ci_val <= 400:
-#                 bucket_type = "YELLOW"
-#             else:
-#                 bucket_type = "DIRTY_RED"
-
-#             if current_bucket is None:
-#                 current_bucket = bucket_type
-#                 current_start = hour_offset
-#                 current_length = 1
-#             elif bucket_type == current_bucket:
-#                 current_length += 1
-#             else:
-#                 rle_index[r][current_bucket].append({
-#                     "start": current_start,
-#                     "length": current_length
-#                 })
-#                 current_bucket = bucket_type
-#                 current_start = hour_offset
-#                 current_length = 1
-
-#         if current_bucket is not None:
-#             rle_index[r][current_bucket].append({
-#                 "start": current_start,
-#                 "length": current_length
-#             })
-
-#     return rle_index
 
 def preprocess_carbon_to_rle_buckets(all_regions_intensities, REGIONS, max_window_hours):
     # --- GLOBAL PERCENTILE THRESHOLDS ---
@@ -900,7 +892,7 @@ def preprocess_carbon_to_rle_buckets(all_regions_intensities, REGIONS, max_windo
         else:
             return "DIRTY_RED"
 
-    # --- PER-REGION RLE ENCODING (unchanged) ---
+    # --- PER-REGION RLE ENCODING ---
     rle_index = {r: {"DARK_GREEN": [], "LIGHT_GREEN": [], "YELLOW": [], "DIRTY_RED": []} for r in REGIONS}
 
     for r in REGIONS:
@@ -960,104 +952,301 @@ def get_incoming_transfer_footprint(task, task_map, task_scheduled_regions, curr
                 
     return total_cross_region_gb
 
-# def commit_path_to_schedule_via_rle_intervals(final_manifest, current_state, path, region, start_hour, naive_submission, base_ci, all_regions_intensities):
-#     """
-#     Lightweight commit tracker that calculates carbon metrics on-the-fly 
-#     only for the final assigned execution window.
-#     """
-#     current_offset = start_hour
-#     region_intensities = all_regions_intensities.get(region, {})
-#     sorted_ts = sorted(region_intensities.keys())
-#     timeline = [region_intensities[ts] for ts in sorted_ts]
-
-
-#     for pt in path['tasks']:
-#         # Duplication shield to protect shared execution nodes
-#         if pt['id'] in final_manifest:
-#             # If already scheduled by a previous overlapping path, inherit its end offset
-#             p_start_dt = dt.datetime.fromisoformat(final_manifest[pt['id']]['start'])
-#             current_offset = int((p_start_dt - naive_submission).total_seconds() // 3600) + final_manifest[pt['id']]['dur']
-#             continue
-            
-#         # --- FIXED: INFRASTRUCTURE CAPACITY AND GAP GUARD LOOP ---
-#         while True:
-#             t_start = naive_submission + dt.timedelta(hours=current_offset)
-#             t_lookup = t_start.replace(minute=0, second=0, microsecond=0)
-            
-#             # Guard 1: Verify we aren't spilling past our planning deadline
-#             if current_offset + pt['dur'] > max_window_hours:
-#                 print(f"[CRITICAL WARNING] Task {pt['id']} pushed out of deadline bounds due to capacity saturation!")
-#                 break
-
-#             # Guard 2: Scan across the task's execution hours to check for a core overflow
-#             capacity_overflow = False
-#             for h in range(pt['dur']):
-#                 ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
-#                 cores_already_used = current_state.get(region, {}).get(ts, 0)
-                
-#                 # If adding this task's cores breaks the cluster limit, we have a collision
-#                 if cores_already_used + pt['cores'] > TOTAL_CORES_PER_REGION:
-#                     capacity_overflow = True
-#                     break
-            
-#             # If the cluster has enough physical room, break out of the while loop and schedule it!
-#             if not capacity_overflow:
-#                 break
-                
-#             # If the slot is congested, delay this task by 1 hour and test again
-#             current_offset += 1
-
-#         # Re-calculate correct dates based on our final un-congested offset
-#         t_start = naive_submission + dt.timedelta(hours=current_offset)
-#         t_lookup = t_start.replace(minute=0, second=0, microsecond=0)
-
-#         # Calculate task carbon intensity dynamically for its running duration
-#         task_ci_sum = 0
-#         for h in range(pt['dur']):
-#             h_idx = current_offset + h
-#             task_ci_sum += timeline[h_idx] if h_idx < len(timeline) else (timeline[-1] if timeline else 400)
-            
-#         pt_ci = task_ci_sum / pt['dur'] if pt['dur'] > 0 else 400
-        
-#         pt_aware_carbon = pt_ci * (pt['dur'] * pt['cores'])
-#         pt_baseline_carbon = base_ci * (pt['dur'] * pt['cores'])
-        
-#         # Commit cleanly to our workflow manifest blueprint
-#         final_manifest[pt['id']] = {
-#             "start": t_lookup.isoformat(), 
-#             "dur": pt['dur'], 
-#             "region": region, 
-#             "cores": pt['cores'],
-#             "pt_ci": round(base_ci, 2), 
-#             "target_ci": round(pt_ci, 2),
-#             "saved_g": round(pt_baseline_carbon - pt_aware_carbon, 2),
-#             "pct": round(((pt_baseline_carbon - pt_aware_carbon) / pt_baseline_carbon * 100), 1) if pt_baseline_carbon > 0 else 0
-#         }
-        
-#         # Deduct available resources from cluster ledger (Locking the keys)
-#         if region not in current_state:
-#             current_state[region] = {}
-#         for h in range(pt['dur']):
-#             ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
-#             current_state[region][ts] = current_state[region].get(ts, 0) + pt['cores']
-            
-#         # Advance the offset past this task's block so the next sibling task respects the dependency gap
 #         current_offset += pt['dur']
 
-def find_greenest_schedule_via_rle(REGIONS, tasks_metadata, all_regions_intensities, rle_index,
-                                    submission_time, max_window_hours, base_ci):
+def _schedule_late_with_parallel_transfers(tasks_metadata, source_region, submission_time,
+                                           max_window_hours, base_ci, in_memory_state=None):
     """
-    FIXED: Resilient Trial-Validated Bucket Scheduler with Network Transfer Penalties.
-    Simulates remaining workflow paths while evaluating storage cross-region network overhead.
+    Late scheduling fallback for when the workflow critical path exceeds the deadline.
+
+    Strategy:
+      1. Schedule ALL tasks in source_region in topological order, past the
+         deadline if necessary (atomic-style baseline, no region hopping yet).
+      2. Group tasks whose execution windows genuinely overlap in this baseline
+         (parallel siblings — not an ancestor/descendant of one another).
+      3. Within each parallel group, a task is only considered for transfer out
+         of source_region if:
+           (a) source_region is not the greenest available option for it, OR
+           (b) source_region cannot hold every task in the group at once
+               (combined cores demand of the group exceeds CORES_LIMIT).
+         When a group qualifies, the SMALLEST tasks (lowest cores*dur footprint,
+         tie-broken by transfer payload size) are offloaded first, since they are
+         the cheapest/fastest to move and least likely to be pushed further past
+         the deadline by transfer latency.
     """
-    # 1. Build an index map of tasks for parent/dependency lookups
+    DEADLINE_PENALTY_MULTIPLIER = 1.5
+
     task_map = {t['id']: t for t in tasks_metadata}
-    
-    # Calculate downstream critical path depth for each task to prioritize important nodes
+    naive_submission = submission_time.replace(tzinfo=None, minute=0, second=0, microsecond=0)
+
+    if in_memory_state is None:
+        current_state = load_cluster_state()
+    else:
+        current_state = copy.deepcopy(in_memory_state)
+
+    for r in REGIONS:
+        if r not in current_state:
+            current_state[r] = {}
+
+    # Topological sort so parents are always scheduled before children
+    def topo_sort():
+        in_deg = {t['id']: 0 for t in tasks_metadata}
+        graph  = {t['id']: [] for t in tasks_metadata}
+        for t in tasks_metadata:
+            for p in t.get('depends_on', []):
+                graph[p].append(t['id'])
+                in_deg[t['id']] += 1
+        queue = [t['id'] for t in tasks_metadata if in_deg[t['id']] == 0]
+        order = []
+        while queue:
+            tid = queue.pop(0)
+            order.append(tid)
+            for child in graph[tid]:
+                in_deg[child] -= 1
+                if in_deg[child] == 0:
+                    queue.append(child)
+        return [task_map[tid] for tid in order]
+
+    ordered_tasks = topo_sort()
+
+    final_manifest    = {}
+    task_end_times     = {}   # hour offset from submission
+    task_start_times   = {}   # hour offset from submission
+    task_regions        = {}
+    task_transfer_carbon = {t['id']: 0.0 for t in ordered_tasks}
+
+    def get_ci(region, hour_idx):
+        all_intensities = load_carbon_data(
+            region,
+            naive_submission,
+            naive_submission + dt.timedelta(hours=hour_idx + 48)
+        )
+        target_dt = naive_submission + dt.timedelta(hours=hour_idx)
+        target_dt = target_dt.replace(minute=0, second=0, microsecond=0)
+        if target_dt in all_intensities:
+            return all_intensities[target_dt]
+        if all_intensities:
+            closest = min(all_intensities.keys(), key=lambda d: abs((d - target_dt).total_seconds()))
+            return all_intensities[closest]
+        return 400
+
+    def region_avg_ci(region, start_hour, dur):
+        return sum(get_ci(region, start_hour + h) for h in range(dur)) / dur
+
+    def find_slot(region, task, earliest_hour):
+        """Find earliest available slot in region from earliest_hour onwards."""
+        for h in range(earliest_hour, earliest_hour + 240):
+            cap_ok = all(
+                current_state[region].get(
+                    (naive_submission + dt.timedelta(hours=h + fh)).replace(
+                        minute=0, second=0, microsecond=0).isoformat(), 0
+                ) + task['cores'] <= CORES_LIMIT
+                for fh in range(task['dur'])
+            )
+            if cap_ok:
+                return h
+        return earliest_hour  # last resort
+
+    def book_slot(region, start_hour, task):
+        for h in range(task['dur']):
+            ts = (naive_submission + dt.timedelta(hours=start_hour + h)).replace(
+                minute=0, second=0, microsecond=0).isoformat()
+            current_state[region][ts] = current_state[region].get(ts, 0) + task['cores']
+
+    def unbook_slot(region, start_hour, task):
+        for h in range(task['dur']):
+            ts = (naive_submission + dt.timedelta(hours=start_hour + h)).replace(
+                minute=0, second=0, microsecond=0).isoformat()
+            current_state[region][ts] = max(0, current_state[region].get(ts, 0) - task['cores'])
+
+    def ancestors_of(task):
+        anc = set()
+        queue = list(task.get('depends_on', []))
+        while queue:
+            p = queue.pop()
+            anc.add(p)
+            queue.extend(task_map.get(p, {}).get('depends_on', []))
+        return anc
+
+    def descendants_of(task_id):
+        return {t['id'] for t in tasks_metadata if task_id in t.get('depends_on', [])}
+
+    # ── PHASE 1: baseline — schedule every task in source_region only ────────
+    for task in ordered_tasks:
+        parents = task.get('depends_on', [])
+        safe_start = max((task_end_times.get(p_id, 0) for p_id in parents), default=0)
+        slot = find_slot(source_region, task, safe_start)
+        book_slot(source_region, slot, task)
+        task_start_times[task['id']] = slot
+        task_end_times[task['id']]   = slot + task['dur']
+        task_regions[task['id']]     = source_region
+
+    # ── PHASE 2: group tasks whose windows genuinely overlap ─────────────────
+    task_ids   = [t['id'] for t in ordered_tasks]
+    anc_cache  = {t['id']: ancestors_of(t) for t in ordered_tasks}
+    desc_cache = {t['id']: descendants_of(t['id']) for t in ordered_tasks}
+
+    def overlaps(a_id, b_id):
+        if b_id in anc_cache[a_id] or b_id in desc_cache[a_id]:
+            return False
+        a_s, a_e = task_start_times[a_id], task_end_times[a_id]
+        b_s, b_e = task_start_times[b_id], task_end_times[b_id]
+        return a_s < b_e and a_e > b_s
+
+    adjacency = {tid: set() for tid in task_ids}
+    for i in range(len(task_ids)):
+        for j in range(i + 1, len(task_ids)):
+            a_id, b_id = task_ids[i], task_ids[j]
+            if overlaps(a_id, b_id):
+                adjacency[a_id].add(b_id)
+                adjacency[b_id].add(a_id)
+
+    visited, groups = set(), []
+    for tid in task_ids:
+        if tid in visited or not adjacency[tid]:
+            continue
+        stack, comp = [tid], set()
+        while stack:
+            cur = stack.pop()
+            if cur in comp:
+                continue
+            comp.add(cur)
+            visited.add(cur)
+            stack.extend(adjacency[cur] - comp)
+        groups.append(comp)
+
+    # ── PHASE 3: within each parallel group, offload smallest tasks first ────
+    for group in groups:
+        group_tasks = sorted(
+            (task_map[tid] for tid in group),
+            key=lambda t: (t['cores'] * t['dur'],
+                            task_map[t['id']].get('output_size_gb', DATA_SIZE_GB))
+        )
+        group_cores_demand = sum(t['cores'] for t in group_tasks)
+        capacity_exceeded  = group_cores_demand > CORES_LIMIT
+
+        for idx, task in enumerate(group_tasks):
+            tid = task['id']
+            if task_regions[tid] != source_region:
+                continue  # already moved earlier in this pass
+
+            # Only the SMALLEST task in the group is eligible for a move that's
+            # motivated purely by "source isn't the greenest option." Larger
+            # siblings are only touched if the group still can't fit in
+            # source_region after the smaller ones have been offloaded — and
+            # even then, only as many of them as are needed to relieve it.
+            if idx > 0 and not capacity_exceeded:
+                break
+
+            slot = task_start_times[tid]
+            is_late = slot >= max_window_hours
+            source_ci = region_avg_ci(source_region, slot, task['dur'])
+            source_exec_carbon = source_ci * task['cores'] * task['dur'] * 0.2
+            source_total = source_exec_carbon * (DEADLINE_PENALTY_MULTIPLIER if is_late else 1.0)
+
+            parents = task.get('depends_on', [])
+            safe_start = max((task_end_times.get(p_id, 0) for p_id in parents), default=0)
+
+            best_candidate = None  # (sort_key, region, slot, transfer_carbon, carbon_saved)
+
+            for candidate_region in REGIONS:
+                if candidate_region == source_region:
+                    continue
+
+                data_size = sum(
+                    task_map[p_id].get('output_size_gb', DATA_SIZE_GB)
+                    for p_id in parents
+                    if p_id in task_map
+                ) or DATA_SIZE_GB
+
+                t_hours, t_carbon = calculate_transfer_penalty(
+                    target_region=candidate_region,
+                    source_region=source_region,
+                    data_size_gb=data_size
+                )
+
+                candidate_earliest = max(safe_start + math.ceil(t_hours), safe_start)
+                candidate_slot = find_slot(candidate_region, task, candidate_earliest)
+
+                candidate_ci = region_avg_ci(candidate_region, candidate_slot, task['dur'])
+                candidate_exec_carbon = candidate_ci * task['cores'] * task['dur'] * 0.2
+                mult = DEADLINE_PENALTY_MULTIPLIER if candidate_slot >= max_window_hours else 1.0
+                candidate_total = (candidate_exec_carbon * mult) + t_carbon
+
+                carbon_saved = source_total - candidate_total
+                is_greener = carbon_saved > 0
+
+                # Gate: only a valid move if source isn't the greenest option
+                # for this task, OR the group can't fit in source_region at once.
+                if not is_greener and not capacity_exceeded:
+                    continue
+
+                # Prefer genuinely greener regions; among ties (or forced moves
+                # when nothing is greener), prefer the lowest total cost.
+                sort_key = (0 if is_greener else 1, candidate_total)
+                if best_candidate is None or sort_key < best_candidate[0]:
+                    best_candidate = (sort_key, candidate_region, candidate_slot, t_carbon, carbon_saved)
+
+            if best_candidate is not None:
+                _, chosen_region, chosen_slot, transfer_carbon, carbon_saved = best_candidate
+
+                unbook_slot(source_region, slot, task)
+                book_slot(chosen_region, chosen_slot, task)
+
+                task_start_times[tid]     = chosen_slot
+                task_end_times[tid]       = chosen_slot + task['dur']
+                task_regions[tid]         = chosen_region
+                task_transfer_carbon[tid] = transfer_carbon
+
+                reason = "greener region" if carbon_saved > 0 else "source at capacity"
+                print(f"[LATE TRANSFER] Task {tid} {source_region}→{chosen_region} "
+                      f"(reason: {reason}) | carbon delta: {carbon_saved:.2f}g | "
+                      f"transfer cost: {transfer_carbon:.2f}g")
+
+                group_cores_demand -= task['cores']
+                capacity_exceeded = group_cores_demand > CORES_LIMIT
+
+    # ── PHASE 4: build the final manifest ─────────────────────────────────────
+    for task in ordered_tasks:
+        tid = task['id']
+        chosen_region   = task_regions[tid]
+        chosen_slot     = task_start_times[tid]
+        transfer_carbon = task_transfer_carbon[tid]
+
+        t_lookup = (naive_submission + dt.timedelta(hours=chosen_slot)).replace(
+            minute=0, second=0, microsecond=0)
+
+        task_ci     = region_avg_ci(chosen_region, chosen_slot, task['dur'])
+        is_late     = chosen_slot >= max_window_hours
+        mult        = DEADLINE_PENALTY_MULTIPLIER if is_late else 1.0
+        exec_carbon = task_ci * task['cores'] * task['dur'] * 0.2 * mult
+        pt_baseline = base_ci * task['dur'] * task['cores']
+
+        final_manifest[tid] = {
+            "start":             t_lookup.isoformat(),
+            "dur":               task['dur'],
+            "region":            chosen_region,
+            "cores":             task['cores'],
+            "pt_ci":             round(base_ci, 2),
+            "target_ci":         round(task_ci, 2),
+            "transfer_carbon_g": round(transfer_carbon, 2),
+            "scheduled_late":    is_late,
+            "saved_g":           round(pt_baseline - exec_carbon - transfer_carbon, 2),
+            "pct":               round(((pt_baseline - exec_carbon - transfer_carbon) / pt_baseline * 100), 1)
+                                 if pt_baseline > 0 else 0
+        }
+
+    save_cluster_state(current_state)
+    return final_manifest
+
+
+def find_greenest_schedule_via_rle(REGIONS, tasks_metadata, all_regions_intensities, rle_index,
+                                    submission_time, max_window_hours, base_ci, in_memory_state=None, source_region=None):
+    task_map = {t['id']: t for t in tasks_metadata}
+
     def get_task_priority(task_id, memo=None):
         if memo is None: memo = {}
-        if task_id in memo:
-            return memo[task_id]
+        if task_id in memo: return memo[task_id]
         t = task_map[task_id]
         dependent_tasks = [other for other in tasks_metadata if task_id in other.get('depends_on', [])]
         if not dependent_tasks:
@@ -1066,20 +1255,20 @@ def find_greenest_schedule_via_rle(REGIONS, tasks_metadata, all_regions_intensit
         memo[task_id] = t['dur'] + max(get_task_priority(dep['id'], memo) for dep in dependent_tasks)
         return memo[task_id]
 
-    # Order tasks globally by execution priority (Critical path sequencing)
     sorted_tasks = sorted(tasks_metadata, key=lambda x: get_task_priority(x['id']), reverse=True)
 
-    # 2. Synchronize multi-run cluster state
-    current_state = load_cluster_state()
+    if in_memory_state is not None:
+        current_state = copy.deepcopy(in_memory_state)
+    else:
+        current_state = load_cluster_state()
     for r in REGIONS:
         if r not in current_state: current_state[r] = {}
 
     final_manifest = {}
-    task_end_times = {}           # Tracks raw integer hour index when each task finishes
-    task_scheduled_regions = {}   # Tracks region identity where each task was finalized
+    task_end_times = {}
+    task_scheduled_regions = {}
     naive_submission = submission_time.replace(tzinfo=None)
 
-    # Helper to pull regional carbon intensity safely
     def get_carbon_at_hour(reg, hour_idx):
         intensities = all_regions_intensities.get(reg, {})
         sorted_ts = sorted(intensities.keys())
@@ -1087,7 +1276,6 @@ def find_greenest_schedule_via_rle(REGIONS, tasks_metadata, all_regions_intensit
             return intensities[sorted_ts[hour_idx]]
         return intensities[sorted_ts[-1]] if sorted_ts else 400
 
-    # Build target search pools sorted by absolute carbon footprint
     def build_ranked_pool(bucket_types):
         pool = []
         for region in REGIONS:
@@ -1105,116 +1293,110 @@ def find_greenest_schedule_via_rle(REGIONS, tasks_metadata, all_regions_intensit
         pool.sort(key=lambda x: x['avg_ci'])
         return pool
 
-    clean_bucket_pool = build_ranked_pool(["DARK_GREEN"])
-    print(clean_bucket_pool)
-    # 3. Schedule Task-by-Task
+    # Build all buckets upfront — fallback expands progressively
+    all_bucket_pool = build_ranked_pool(["DARK_GREEN", "LIGHT_GREEN", "YELLOW", "DIRTY_RED"])
+
     for idx, pt in enumerate(sorted_tasks):
         parents = pt.get('depends_on', [])
         latest_allowed_start = max_window_hours - pt['dur']
-        
+
         best_slot = None
         best_region = None
         best_transfer_carbon = 0
+        best_avg_ci = float('inf')  # Track best carbon found so we pick greenest, not just first
 
-        # Internal helper to sweep a specific bucket pool with look-ahead trial validation
         def evaluate_pool(bucket_pool):
-            nonlocal best_slot, best_region, best_transfer_carbon
+            nonlocal best_slot, best_region, best_transfer_carbon, best_avg_ci
+
             for bucket in bucket_pool:
+                # Early exit: if this bucket is already dirtier than our best found slot, stop
+                if bucket['avg_ci'] >= best_avg_ci:
+                    break
+
                 region = bucket['region']
-                
-                # --- CALCULATE STORAGE TRANSFER PENALTY OVERHEAD ---
                 earliest_start = 0
                 current_node_transfer_carbon = 0
-                
+
                 if parents:
                     parent_times = []
-                    # Get network transit size requirements from parent metrics
                     task_data_size = get_incoming_transfer_footprint(pt, task_map, task_scheduled_regions, region)
-                    print(f"[DEBUG] task_size: {task_data_size} GB for task {pt['id']} in region {region}")
                     for p_id in parents:
                         p_end_hour = task_end_times.get(p_id, 0)
                         p_region = task_scheduled_regions.get(p_id, region)
-                        
-                        # Process cross-regional penalties via external framework utility
                         t_hours, t_carbon = calculate_transfer_penalty(
                             target_region=region,
                             source_region=p_region,
                             data_size_gb=task_data_size
                         )
-                        print(f"[DEBUG] transfer_carbon: {t_carbon} for task {pt['id']} in region {region}")
-                        
-                        # Pad availability with raw integer time delay caps
                         parent_times.append(p_end_hour + math.ceil(t_hours))
                         current_node_transfer_carbon += t_carbon
-                    
                     earliest_start = max(parent_times) if parent_times else 0
 
-                workflow_remaining_dur = get_task_priority(pt['id']) 
                 search_start = max(bucket['start'], earliest_start)
                 bucket_end = bucket['start'] + bucket['length']
-                search_end = min(bucket_end + workflow_remaining_dur, latest_allowed_start)
-                
+                search_end = min(bucket_end, latest_allowed_start)
+
                 if search_start > search_end:
                     continue
 
                 for start_hour in range(search_start, search_end + 1):
-                    # --- SIMULATION TRIAL CAPACITY CHECK ---
+                    # Capacity check
                     capacity_violated = False
                     for h in range(pt['dur']):
-                        t_slot = (naive_submission + dt.timedelta(hours=start_hour + h)).replace(minute=0, second=0, microsecond=0).isoformat()
-                        cores_used = current_state[region].get(t_slot, 0)
-                        if cores_used + pt['cores'] > TOTAL_CORES_PER_REGION:
+                        t_slot = (naive_submission + dt.timedelta(hours=start_hour + h)).replace(
+                            minute=0, second=0, microsecond=0).isoformat()
+                        if current_state[region].get(t_slot, 0) + pt['cores'] > CORES_LIMIT:
                             capacity_violated = True
                             break
-
                     if capacity_violated:
                         continue
 
-                    # --- DOWNSTREAM VALIDATION LOOK-AHEAD SIMULATION ---
+                    # Lookahead: check all future tasks can fit somewhere
+                    # Uses ALL buckets (including dirty) so it doesn't reject valid placements
                     trial_state = copy.deepcopy(current_state)
                     trial_end_times = copy.deepcopy(task_end_times)
                     trial_regions = copy.deepcopy(task_scheduled_regions)
-                    
-                    # Project current node placement cleanly into simulation sandbox
+
                     trial_end_times[pt['id']] = start_hour + pt['dur']
                     trial_regions[pt['id']] = region
-                    
                     for h in range(pt['dur']):
-                        t_slot = (naive_submission + dt.timedelta(hours=start_hour + h)).replace(minute=0, second=0, microsecond=0).isoformat()
+                        t_slot = (naive_submission + dt.timedelta(hours=start_hour + h)).replace(
+                            minute=0, second=0, microsecond=0).isoformat()
                         trial_state[region][t_slot] = trial_state[region].get(t_slot, 0) + pt['cores']
 
                     lookahead_success = True
-                    
                     for future_pt in sorted_tasks[idx + 1:]:
                         f_parents = future_pt.get('depends_on', [])
                         if not f_parents:
                             continue
-                        
+
                         child_fit_found = False
                         for r_check in REGIONS:
                             f_parent_times = []
-                            f_data_size = get_incoming_transfer_footprint(future_pt, task_map, trial_regions, r_check)
-                            
+                            f_data_size = get_incoming_transfer_footprint(
+                                future_pt, task_map, trial_regions, r_check)
                             for p_id in f_parents:
                                 if p_id in trial_end_times:
                                     p_end = trial_end_times[p_id]
                                     p_reg = trial_regions.get(p_id, r_check)
-                                    
                                     f_t_hours, _ = calculate_transfer_penalty(
                                         target_region=r_check,
                                         source_region=p_reg,
                                         data_size_gb=f_data_size
                                     )
                                     f_parent_times.append(p_end + math.ceil(f_t_hours))
-                            
+
                             f_earliest = max(f_parent_times) if f_parent_times else 0
                             f_latest = max_window_hours - future_pt['dur']
-                            
+
+                            # FIX: search the FULL window, not just green buckets
+                            # The lookahead only needs to confirm feasibility, not optimality
                             for f_slot in range(f_earliest, f_latest + 1):
                                 f_cap_violated = False
                                 for fh in range(future_pt['dur']):
-                                    ft_slot = (naive_submission + dt.timedelta(hours=f_slot + fh)).replace(minute=0, second=0, microsecond=0).isoformat()
-                                    if trial_state[r_check].get(ft_slot, 0) + future_pt['cores'] > TOTAL_CORES_PER_REGION:
+                                    ft_slot = (naive_submission + dt.timedelta(hours=f_slot + fh)).replace(
+                                        minute=0, second=0, microsecond=0).isoformat()
+                                    if trial_state[r_check].get(ft_slot, 0) + future_pt['cores'] > CORES_LIMIT:
                                         f_cap_violated = True
                                         break
                                 if not f_cap_violated:
@@ -1222,69 +1404,220 @@ def find_greenest_schedule_via_rle(REGIONS, tasks_metadata, all_regions_intensit
                                     trial_end_times[future_pt['id']] = f_slot + future_pt['dur']
                                     trial_regions[future_pt['id']] = r_check
                                     for fh in range(future_pt['dur']):
-                                        ft_slot = (naive_submission + dt.timedelta(hours=f_slot + fh)).replace(minute=0, second=0, microsecond=0).isoformat()
+                                        ft_slot = (naive_submission + dt.timedelta(hours=f_slot + fh)).replace(
+                                            minute=0, second=0, microsecond=0).isoformat()
                                         trial_state[r_check][ft_slot] = trial_state[r_check].get(ft_slot, 0) + future_pt['cores']
                                     break
                             if child_fit_found:
                                 break
-                        
+
                         if not child_fit_found:
                             lookahead_success = False
                             break
 
                     if lookahead_success:
-                        best_slot = start_hour
-                        best_region = region
-                        best_transfer_carbon = current_node_transfer_carbon
-                        return 
+                        # FIX: don't return immediately — track best carbon and keep searching
+                        slot_ci = sum(get_carbon_at_hour(region, start_hour + h) for h in range(pt['dur'])) / pt['dur']
+                        total_carbon = slot_ci * pt['cores'] * pt['dur'] + current_node_transfer_carbon
+                        if total_carbon < best_avg_ci * pt['cores'] * pt['dur']:
+                            best_slot = start_hour
+                            best_region = region
+                            best_transfer_carbon = current_node_transfer_carbon
+                            best_avg_ci = slot_ci
 
-        # Process search sequences
-        evaluate_pool(clean_bucket_pool)
-        if best_slot is None:
-            print(f"[FALLBACK] Task {pt['id']} triggered a look-ahead bottleneck. Expanding search boundaries...")
-            fallback_bucket_pool = build_ranked_pool(["LIGHT_GREEN", "YELLOW", "DIRTY_RED"])
-            evaluate_pool(fallback_bucket_pool)
+        evaluate_pool(all_bucket_pool)
 
-        # 4. Final Commit and Ledger Updates
+        # 4. Commit or fallback
         if best_region is not None and best_slot is not None:
-            t_lookup = (naive_submission + dt.timedelta(hours=best_slot)).replace(minute=0, second=0, microsecond=0)
-            
+            t_lookup = (naive_submission + dt.timedelta(hours=best_slot)).replace(
+                minute=0, second=0, microsecond=0)
+
             task_ci_sum = sum(get_carbon_at_hour(best_region, best_slot + h) for h in range(pt['dur']))
             pt_ci = task_ci_sum / pt['dur']
-            
-            # Incorporate transit carbon cost into total manifest accountability
             pt_aware_carbon = (pt_ci * (pt['dur'] * pt['cores'])) + best_transfer_carbon
             pt_baseline_carbon = base_ci * (pt['dur'] * pt['cores'])
-            
+
             final_manifest[pt['id']] = {
-                "start": t_lookup.isoformat(), 
-                "dur": pt['dur'], 
-                "region": best_region, 
+                "start": t_lookup.isoformat(),
+                "dur": pt['dur'],
+                "region": best_region,
                 "cores": pt['cores'],
-                "pt_ci": round(base_ci, 2), 
+                "pt_ci": round(base_ci, 2),
                 "target_ci": round(pt_ci, 2),
                 "transfer_carbon_g": round(best_transfer_carbon, 2),
                 "saved_g": round(pt_baseline_carbon - pt_aware_carbon, 2),
                 "pct": round(((pt_baseline_carbon - pt_aware_carbon) / pt_baseline_carbon * 100), 1) if pt_baseline_carbon > 0 else 0
             }
-            
+
             for h in range(pt['dur']):
                 ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
                 current_state[best_region][ts] = current_state[best_region].get(ts, 0) + pt['cores']
-            
+
             task_end_times[pt['id']] = best_slot + pt['dur']
             task_scheduled_regions[pt['id']] = best_region
+
         else:
-            print(f"[FATAL FAILURE] Task {pt['id']} cannot fit within cluster limits.")
-            safe_fallback_start = max((task_end_times.get(p_id, 0) for p_id in parents), default=0)
-            task_end_times[pt['id']] = safe_fallback_start + pt['dur']
-            task_scheduled_regions[pt['id']] = REGIONS[0]
+            # ── LATE FALLBACK ────────────────────────────────────────────────
+            # No deadline-respecting slot was found for this task.
+            # Strategy:
+            #   1. Schedule this task in source_region at the earliest available
+            #      slot past the deadline (atomic-style, no region change).
+            #   2. Exception: if this task is PARALLEL to already-scheduled tasks
+            #      (i.e. its execution window overlaps with siblings that are
+            #      running at the same time) AND moving it to a greener region
+            #      saves more carbon than the transfer costs, allow the transfer.
+            #
+            # "Parallel" means: the task's start hour is between another task's
+            # start and end — they genuinely overlap in execution time.
+
+            safe_start = max(
+                (task_end_times.get(p_id, 0) for p_id in parents), default=0
+            )
+
+            # ── Step 1: find earliest slot in source_region past the deadline ─
+            source_slot = None
+            extended_window = safe_start + 240  # look up to 10 days ahead
+
+            for h in range(safe_start, extended_window):
+                cap_ok = all(
+                    current_state[source_region].get(
+                        (naive_submission + dt.timedelta(hours=h + fh)).replace(
+                            minute=0, second=0, microsecond=0).isoformat(), 0
+                    ) + pt['cores'] <= CORES_LIMIT
+                    for fh in range(pt['dur'])
+                )
+                if cap_ok:
+                    source_slot = h
+                    break
+
+            # Absolute last resort — force it even if over capacity
+            if source_slot is None:
+                source_slot = safe_start
+                print(f"[LAST RESORT] Task {pt['id']} forced to hour {source_slot} in {source_region}.")
+
+            chosen_slot   = source_slot
+            chosen_region = source_region
+            transfer_carbon = 0.0
+
+            # ── Step 2: check if a parallel transfer to a greener region pays off ─
+            # A task is parallel if its execution window overlaps with at least
+            # one already-scheduled task (they run at the same time).
+            is_parallel = any(
+                task_end_times.get(other_id, 0) > source_slot and
+                source_slot + pt['dur'] > (task_end_times.get(other_id, 0) - task_map[other_id]['dur']
+                                            if other_id in task_map else 0)
+                for other_id in task_scheduled_regions
+                if other_id not in parents and pt['id'] not in [
+                    t['id'] for t in tasks_metadata
+                    if other_id in t.get('depends_on', [])
+                ]
+            )
+
+            if is_parallel:
+                source_ci_at_slot = sum(
+                    get_carbon_at_hour(source_region, source_slot + h)
+                    for h in range(pt['dur'])
+                ) / pt['dur']
+
+                source_carbon = source_ci_at_slot * pt['cores'] * pt['dur'] * 0.2
+
+                for candidate_region in REGIONS:
+                    if candidate_region == source_region:
+                        continue
+
+                    # Transfer cost for moving this task's input data
+                    task_data_size = get_incoming_transfer_footprint(
+                        pt, task_map, task_scheduled_regions, candidate_region
+                    )
+                    t_hours, t_carbon = calculate_transfer_penalty(
+                        target_region=candidate_region,
+                        source_region=source_region,
+                        data_size_gb=task_data_size if task_data_size > 0 else DATA_SIZE_GB
+                    )
+
+                    # Candidate slot must respect transfer time
+                    candidate_slot = max(source_slot, safe_start + math.ceil(t_hours))
+
+                    # Find earliest valid slot in candidate region
+                    candidate_actual_slot = None
+                    for h in range(candidate_slot, extended_window):
+                        cap_ok = all(
+                            current_state[candidate_region].get(
+                                (naive_submission + dt.timedelta(hours=h + fh)).replace(
+                                    minute=0, second=0, microsecond=0).isoformat(), 0
+                            ) + pt['cores'] <= CORES_LIMIT
+                            for fh in range(pt['dur'])
+                        )
+                        if cap_ok:
+                            candidate_actual_slot = h
+                            break
+
+                    if candidate_actual_slot is None:
+                        continue
+
+                    # Carbon cost in the candidate region
+                    candidate_ci = sum(
+                        get_carbon_at_hour(candidate_region, candidate_actual_slot + h)
+                        for h in range(pt['dur'])
+                    ) / pt['dur']
+                    candidate_carbon = candidate_ci * pt['cores'] * pt['dur'] * 0.2
+
+                    # Does the transfer compensate?
+                    # i.e. carbon saved > transfer carbon cost
+                    carbon_saved = source_carbon - (candidate_carbon + t_carbon)
+
+                    if carbon_saved > 0:
+                        print(f"[FALLBACK GREEN TRANSFER] Task {pt['id']} "
+                                f"{source_region}→{candidate_region} saves {carbon_saved:.2f}g "
+                                f"(exec: {source_carbon:.2f}→{candidate_carbon:.2f}, "
+                                f"transfer: {t_carbon:.2f}g)")
+                        chosen_slot   = candidate_actual_slot
+                        chosen_region = candidate_region
+                        transfer_carbon = t_carbon
+                        break  # take the first region that compensates
+
+            # ── Commit the task ──────────────────────────────────────────────
+            is_late = chosen_slot >= max_window_hours
+
+            t_lookup = (naive_submission + dt.timedelta(hours=chosen_slot)).replace(
+                minute=0, second=0, microsecond=0)
+
+            task_ci_sum = sum(
+                get_carbon_at_hour(chosen_region, chosen_slot + h)
+                for h in range(pt['dur'])
+            )
+            pt_ci = task_ci_sum / pt['dur']
+            pt_aware_carbon = (pt_ci * pt['dur'] * pt['cores'] * 0.2) + transfer_carbon
+            pt_baseline_carbon = base_ci * pt['dur'] * pt['cores']
+
+            final_manifest[pt['id']] = {
+                "start":             t_lookup.isoformat(),
+                "dur":               pt['dur'],
+                "region":            chosen_region,
+                "cores":             pt['cores'],
+                "pt_ci":             round(base_ci, 2),
+                "target_ci":         round(pt_ci, 2),
+                "transfer_carbon_g": round(transfer_carbon, 2),
+                "scheduled_late":    is_late,
+                "saved_g":           round(pt_baseline_carbon - pt_aware_carbon, 2),
+                "pct":               round(((pt_baseline_carbon - pt_aware_carbon) / pt_baseline_carbon * 100), 1)
+                                        if pt_baseline_carbon > 0 else 0
+            }
+
+            for h in range(pt['dur']):
+                ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
+                current_state[chosen_region][ts] = current_state[chosen_region].get(ts, 0) + pt['cores']
+
+            task_end_times[pt['id']] = chosen_slot + pt['dur']
+            task_scheduled_regions[pt['id']] = chosen_region
 
     save_cluster_state(current_state)
     return final_manifest
 
 
-def plan_workflow_alg1(run_id, submission_time, deadline_date, tasks_metadata):
+
+
+def plan_workflow_alg1(run_id, submission_time, deadline_date, tasks_metadata, source_region=REGIONS[0]):
     """
     IMPLEMENTS ALG 1:
     - Finds the best window for the WHOLE workflow.
@@ -1297,7 +1630,7 @@ def plan_workflow_alg1(run_id, submission_time, deadline_date, tasks_metadata):
     total_duration = sum(t['dur'] for t in tasks_metadata)
     total_cores = max(t['cores'] for t in tasks_metadata)
     
-    intensities = load_carbon_data(REGIONS[0], submission_time, deadline_date)
+    intensities = load_carbon_data(source_region, submission_time, deadline_date)
     sub_naive = submission_time.replace(tzinfo=None, minute=0, second=0, microsecond=0)
     
     # Get baseline intensity (current moment)
@@ -1311,7 +1644,7 @@ def plan_workflow_alg1(run_id, submission_time, deadline_date, tasks_metadata):
     # Set the baseline as the current "best"
     best_avg = base
     best_start = submission_time
-    best_reg = REGIONS[0]
+    best_reg = source_region
 
     # Calculate search window in hours
     if submission_time.tzinfo is None:
@@ -1357,22 +1690,22 @@ def plan_workflow_alg1(run_id, submission_time, deadline_date, tasks_metadata):
     # 2. Floor the submission time to the hour
     sub_naive = submission_time.replace(tzinfo=None, minute=0, second=0, microsecond=0)
     
-    pt_intensities = load_carbon_data("PT", submission_time, deadline_date)
+    pt_intensities = load_carbon_data(source_region, submission_time, deadline_date)
     if sub_naive in pt_intensities:
         pt_start_intensity = pt_intensities[sub_naive]
     elif pt_intensities:
         available_times = sorted(pt_intensities.keys())
         pt_start_intensity = pt_intensities[available_times[0]]
-        print(f"[DEBUG] Exact time {sub_naive} not in PT logs. Using closest: {available_times[0]}")
+        print(f"[DEBUG] Exact time {sub_naive} not in {source_region} logs. Using closest: {available_times[0]}")
     else:
         pt_start_intensity = 400 # Realistic fallback for PT if logs are empty
-        print("[DEBUG] PT logs empty for this window. Using global fallback.")
+        print(f"[DEBUG] {source_region} logs empty for this window. Using global fallback.")
 
     local_execution_carbon = pt_start_intensity * (total_duration * total_cores)
     carbon_saved = local_execution_carbon - best_avg * (total_duration * total_cores)
     # Save and lock resources immediately (Exclusivity)
     print(f"\n[ALGORITHM 1 REPORT]")
-    print(f"  - Local PT Start Intensity: {pt_start_intensity} g/kWh")
+    print(f"  - Local {source_region} Start Intensity: {pt_start_intensity} g/kWh")
     print(f"  - Winner {best_reg} Start Intensity: {best_avg} g/kWh")
     print(f"  - Net Savings: {round(carbon_saved, 2)} gCO2eq")
 
@@ -1393,7 +1726,7 @@ def plan_workflow_alg1(run_id, submission_time, deadline_date, tasks_metadata):
     
     return manifest
 
-def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, data_size_gb, in_memory_state=None):
+def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, data_size_gb, in_memory_state=None, source_region=REGIONS[0]):
     """
     IMPLEMENTS ALG 2:
     - Finds the best window for the WHOLE workflow in a single region.
@@ -1418,10 +1751,10 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
         deadline_date = dt.datetime.fromisoformat(deadline_date)
     deadline_date = deadline_date.replace(tzinfo=dt.timezone.utc)
 
-    # 2. Get baseline carbon details from Portugal (PT)
-    pt_traces = load_carbon_data("PT", submission_time, deadline_date)
+    # 2. Get baseline carbon details from the source region
+    source_traces = load_carbon_data(source_region, submission_time, deadline_date)
     sub_naive = submission_time.replace(tzinfo=None, minute=0, second=0, microsecond=0)
-    pt_base_ci = pt_traces.get(sub_naive, pt_traces[min(pt_traces.keys(), key=lambda d: abs(d-sub_naive))] if pt_traces else 450)
+    source_base_ci = source_traces.get(sub_naive, source_traces[min(source_traces.keys(), key=lambda d: abs(d-sub_naive))] if source_traces else 450)
 
     best_total_impact = float('inf')
     best_reg, best_start, best_manifest = None, None, {}
@@ -1432,7 +1765,7 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
     # 3. Optimization Loop (Whole-Workflow Placement)
     for region in REGIONS:
         # Calculate data transfer overheads for this candidate region
-        time_penalty, carbon_penalty = calculate_transfer_penalty(region, data_size_gb, REGIONS[0])
+        time_penalty, carbon_penalty = calculate_transfer_penalty(region, data_size_gb, source_region)
         eff_deadline = deadline_date - dt.timedelta(hours=time_penalty)
         print(f"\n[DEBUG] Evaluating {region} | Transfer Time Penalty: {round(time_penalty, 2)}h | Carbon Penalty: {round(carbon_penalty, 2)}g | Effective Deadline: {eff_deadline} | Total Workflow Duration: {total_duration}h")
         intensities = load_carbon_data(region, submission_time, eff_deadline)
@@ -1460,7 +1793,7 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
                 for h in range(t['dur']):
                     ts = (t_lookup + dt.timedelta(hours=h)).isoformat()
                     usage = temp_search_state.get(region, {}).get(ts, 0)
-                    if usage + t['cores'] > TOTAL_CORES_PER_REGION:
+                    if usage + t['cores'] > CORES_LIMIT:
                         can_reserve = False
                         break
                 
@@ -1472,7 +1805,7 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
                 t_ci = intensities.get(min(intensities.keys(), key=lambda d: abs(d - t_lookup)), 400)
                 t_aware_carbon = t_ci * (t['dur'] * t['cores'])
                 sim_carbon += t_aware_carbon
-                t_baseline_carbon = pt_base_ci * (t['dur'] * t['cores'])
+                t_baseline_carbon = source_base_ci * (t['dur'] * t['cores'])
 
                 # Track precise structured parameters for metrics/visualizations
                 cand_manifest[t['id']] = {
@@ -1480,7 +1813,7 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
                     "dur": t['dur'], 
                     "region": region, 
                     "cores": t['cores'],
-                    "pt_ci": round(pt_base_ci, 2),
+                    "pt_ci": round(source_base_ci, 2),
                     "target_ci": round(t_ci, 2),
                     "saved_g": round(t_baseline_carbon - t_aware_carbon, 2), 
                     "pct": round(((t_baseline_carbon - t_aware_carbon) / t_baseline_carbon * 100), 1) if t_baseline_carbon > 0 else 0
@@ -1557,16 +1890,24 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
 
     return {}
 
-def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, edges, sla_level, in_memory_state=None):
+def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, edges, sla_level, in_memory_state=None, source_region=None):
     """IMPLEMENTS ALG 3:
     - Spatio-Temporal Shifting with Task-Level Granularity.
     - Evaluates each task independently, allowing them to be scheduled in different regions and times within the same workflow.
     - Uses the dynamic critical path to understand the workflow's temporal constraints and prioritize scheduling decisions.
     - Aims to minimize total carbon impact while respecting the workflow's deadline and SLA requirements.
     """
+
+    if source_region is None:
+        print("[ALG 3] No source region provided. Defaulting to REGIONS[0].")
+        source_region = REGIONS[0]
+    else:
+        print(f"[ALG 3] Planning with source region: {source_region}")
+
     plan_path = get_safe_plan_path(run_id)
-    if os.path.exists(plan_path):
-        with open(plan_path, 'r') as f: return json.load(f)
+    if in_memory_state is None and os.path.exists(plan_path):
+        with open(plan_path, 'r') as f:
+            return json.load(f)
 
     # 1. Setup inicial e Normalização
     cp_duration_hours = get_dynamic_critical_path(tasks_metadata, edges, sla_level)
@@ -1579,9 +1920,9 @@ def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, e
     max_window_hours = int((deadline_date - submission_time).total_seconds() // 3600)
 
     # 2. Baseline de Portugal
-    pt_traces = load_carbon_data("PT", submission_time, deadline_date)
+    source_traces = load_carbon_data(source_region, submission_time, deadline_date)
     sub_naive = submission_time.replace(tzinfo=None, minute=0, second=0, microsecond=0)
-    pt_base_ci = pt_traces.get(sub_naive, pt_traces[min(pt_traces.keys(), key=lambda d: abs(d-sub_naive))] if pt_traces else 450)
+    source_base_ci = source_traces.get(sub_naive, source_traces[min(source_traces.keys(), key=lambda d: abs(d-sub_naive))] if source_traces else 450)
     
     best_reg, best_start, best_manifest, best_duration = None, None, {}, int(cp_duration_hours)
 
@@ -1591,7 +1932,7 @@ def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, e
     # 3. Loop de Otimização (Spatio-Temporal Shifting Iterativo)
     all_regions_intensities = {}
     for r in REGIONS:
-        time_penalty, _ = calculate_transfer_penalty(r, DATA_SIZE_GB)
+        time_penalty, _ = calculate_transfer_penalty(r, DATA_SIZE_GB, source_region)
         eff_deadline = deadline_date - dt.timedelta(hours=time_penalty)
         intensities = load_carbon_data(r, submission_time, eff_deadline)
         if intensities:
@@ -1600,15 +1941,31 @@ def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, e
     # Chamada única à nova estratégia heurística e polinomial
     rle_index = preprocess_carbon_to_rle_buckets(all_regions_intensities, REGIONS, max_window_hours)
 
-    best_manifest = find_greenest_schedule_via_rle(
-        REGIONS=REGIONS,
-        tasks_metadata=tasks_metadata,
-        all_regions_intensities=all_regions_intensities,
-        rle_index=rle_index,
-        submission_time=submission_time,
-        max_window_hours=max_window_hours,
-        base_ci=pt_base_ci
-    )
+    workflow_fits = cp_duration_hours <= max_window_hours
+    print(f"[ALG3] Workflow {run_id} critical path duration: {cp_duration_hours}h | Window: {max_window_hours}h | Fits: {workflow_fits}")
+    if not workflow_fits:
+        print(f"[ALG3] Workflow {run_id} critical path ({cp_duration_hours}h) "
+            f"exceeds window ({max_window_hours}h). Using late fallback strategy.")
+        best_manifest = _schedule_late_with_parallel_transfers(
+            tasks_metadata=tasks_metadata,
+            source_region=source_region,
+            submission_time=submission_time,
+            max_window_hours=max_window_hours,
+            base_ci=source_base_ci,
+            in_memory_state=in_memory_state
+        )
+    else:
+        best_manifest = find_greenest_schedule_via_rle(
+            REGIONS=REGIONS,
+            tasks_metadata=tasks_metadata,
+            all_regions_intensities=all_regions_intensities,
+            rle_index=rle_index,
+            submission_time=submission_time,
+            max_window_hours=max_window_hours,
+            base_ci=source_base_ci,
+            in_memory_state=in_memory_state,
+            source_region=source_region
+        )
 
     # Extrair dinamicamente a região vencedora dominante para manter a compatibilidade com os teus prints
     best_reg = None
@@ -1618,105 +1975,118 @@ def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, e
         best_reg = best_manifest[first_task_id]['region']
 
     # 4. Output, Heatmap e Report Histórico
-    if best_reg:
+    if best_manifest:
         print(f"\n[ALGORITHM 3 REPORT] Workflow: {run_id}")
         print(f"{'Task ID':<15} | {'Region':<8} | {'Saved (g)':<10} | {'Reduction %'}")
         print("-" * 50)
-        
+
         all_regions_window_data = {}
         for reg in REGIONS:
             all_regions_window_data[reg] = load_carbon_data(reg, submission_time, deadline_date)
 
         sub_naive = submission_time.replace(tzinfo=None)
 
-        stats = calculate_standardized_stats(best_manifest, all_regions_window_data, sub_naive, len(tasks_metadata))
-        
+        # FIX: extend the plot and stats window to cover any late tasks
+        last_task_end = max(
+            dt.datetime.fromisoformat(tdata['start']).replace(tzinfo=None) + dt.timedelta(hours=tdata['dur'])
+            for tdata in best_manifest.values()
+        )
+        stats_window_end = max(deadline_date.replace(tzinfo=None), last_task_end)
+
+        # Reload traces covering the extended window if needed
+        if last_task_end > deadline_date.replace(tzinfo=None):
+            for reg in REGIONS:
+                all_regions_window_data[reg] = load_carbon_data(reg, submission_time, last_task_end)
+
+        stats = calculate_standardized_stats(
+            best_manifest, all_regions_window_data, sub_naive,
+            len(tasks_metadata), deadline=deadline_date
+        )
+        stats = _apply_late_carbon_penalty(best_manifest, all_regions_window_data, stats, DEADLINE_PENALTY_MULTIPLIER)
+
         plot_optimization_window_heatmap(
             best_manifest=best_manifest,
             all_regions_data=all_regions_window_data,
             submission_time=submission_time,
-            deadline=deadline_date,
+            deadline=stats_window_end,   # ← extended window so late tasks are visible
             plot_name=f"alg3_{run_id}",
             stats=stats
         )
 
-        actual_sum_saved_g = 0
-        actual_sum_baseline_g = 0
-        
         for tid, d in best_manifest.items():
-            print(f"{tid:<15} | {d['region']:<8} | {d['saved_g']:<10} | {d['pct']}%")
-            actual_sum_saved_g += d['saved_g']
-            actual_sum_baseline_g += (d['saved_g'] / (d['pct']/100)) if d['pct'] > 0 else 0
-        
-        total_reduction_pct = (actual_sum_saved_g / actual_sum_baseline_g * 100) if actual_sum_baseline_g > 0 else 0
-        print(f"--- TOTAL SAVED: {round(actual_sum_saved_g, 2)}g ({round(total_reduction_pct, 1)}%) ---\n")
-        
-        # Gravar apenas o manifesto de planeamento final do Airflow (o ficheiro JSON do plano)
-        with open(plan_path, 'w') as f: 
+            late_flag = " [LATE]" if d.get("scheduled_late") else ""
+            print(f"{tid:<15} | {d['region']:<8} | {d['saved_g']:<10} | {d['pct']}%{late_flag}")
+
+        with open(plan_path, 'w') as f:
             json.dump(best_manifest, f, indent=4)
-            
+
         return best_manifest
 
     return {}
+
     
 
-def plan_batch_alg4(dag_runs_metadata):
+def plan_batch_alg4(dag_runs_metadata, heuristic="EDF", source_region=REGIONS[0], batch_label=None):
     """
-    Explores heuristics like 'Longest Job First' to reduce fragmentation.
-    Now includes statistics calculation for Energy, Carbon, and Success Rate.
+    Explores heuristics like 'Longest Job First' (LWF) and 'Earliest Deadline First' (EDF) to reduce fragmentation.
+    The 'heuristic' argument can be set to either "EDF" or "LWF" to switch approaches seamlessly.
     """
-    HEURISTIC = "other" 
     global_scratchpad = load_cluster_state()
-    
-    # 1. Sort the queue based on Heuristic
-    if HEURISTIC == "EDF":
+
+    # Sort the queue based on the requested Heuristic approach
+    if heuristic == "EDF":
         print("[BATCH PLANNER] Using Earliest Deadline First (EDF) heuristic.")
         queue = sorted(
-            dag_runs_metadata, 
+            dag_runs_metadata,
             key=lambda x: dt.datetime.fromisoformat(x['deadline']) if isinstance(x['deadline'], str) else x['deadline']
         )
     else:
         print("[BATCH PLANNER] Using Longest Workflow First (LWF) heuristic.")
         queue = sorted(
-            dag_runs_metadata, 
+            dag_runs_metadata,
             key=lambda x: sum(t['dur'] for t in x['tasks']) * max(t['cores'] for t in x['tasks']),
             reverse=True
         )
 
-    # 2. Determine batch boundaries
+    # Determine batch boundaries
     all_subs = []
     all_dls = []
-    now = dt.datetime.now().replace(minute=0, second=0, microsecond=0, tzinfo=None)
     total_requested_tasks = 0
     for wf in dag_runs_metadata:
         s, d = wf['submission'], wf['deadline']
-        all_dls.append(dt.datetime.fromisoformat(d) if isinstance(d, str) else d)
+        dl_dt = dt.datetime.fromisoformat(d) if isinstance(d, str) else d
+        all_dls.append(dl_dt.replace(tzinfo=None))
         sub_dt = dt.datetime.fromisoformat(s) if isinstance(s, str) else s
         all_subs.append(sub_dt.replace(tzinfo=None))
         total_requested_tasks += len(wf['tasks'])
-    
-    batch_start_bound = max(min(all_subs), now)
+
+    batch_start_bound = min(all_subs)
     batch_end_bound = max(all_dls)
     print(f"[BATCH PLANNER] Batch Window: {batch_start_bound} to {batch_end_bound} | Total Requested Tasks: {total_requested_tasks}")
-    
+
     batch_results = {}
     total_manifest = {}
 
-    # 3. Plan each workflow
+    # Plan each workflow
     for workflow in queue:
+        wf_submission = workflow['submission']
+        wf_submission = (dt.datetime.fromisoformat(wf_submission)
+                          if isinstance(wf_submission, str) else wf_submission)
+
         plan = plan_workflow_alg3(
-            workflow['run_id'], 
-            batch_start_bound, 
-            workflow['deadline'], 
+            workflow['run_id'],
+            wf_submission, 
+            workflow['deadline'],
             workflow['tasks'],
             workflow['edges'],
             workflow['sla'],
-            in_memory_state=global_scratchpad 
+            in_memory_state=global_scratchpad,
+            source_region=source_region
         )
-        
+
         batch_results[workflow['run_id']] = plan
-        
-        # 4. Update Manifest and Scratchpad
+
+        # Update Manifest and Scratchpad
         for tid, tdata in plan.items():
             unique_key = f"{workflow['run_id']}_{tid}"
             total_manifest[unique_key] = tdata
@@ -1724,37 +2094,183 @@ def plan_batch_alg4(dag_runs_metadata):
             start_dt = dt.datetime.fromisoformat(tdata['start']).replace(tzinfo=None)
             reg = tdata['region']
             t_lookup = start_dt.replace(minute=0, second=0, microsecond=0)
-            
+
             for h in range(tdata['dur']):
                 slot_time_obj = t_lookup + dt.timedelta(hours=h)
-                ts = slot_time_obj.isoformat() 
-                
-                if reg not in global_scratchpad: 
+                ts = slot_time_obj.isoformat()
+
+                if reg not in global_scratchpad:
                     global_scratchpad[reg] = {}
-                    
+
                 current_usage = global_scratchpad[reg].get(ts, 0)
                 global_scratchpad[reg][ts] = current_usage + tdata.get('cores', 2)
 
     save_cluster_state(global_scratchpad)
-    
-    # 6. --- STATISTICS ---
+
+    # Guard against empty manifest before plotting
+    if not total_manifest:
+        print("[BATCH PLANNER] WARNING: No tasks were planned. Skipping heatmap.")
+        return batch_results
+
+    # Statistics
     all_traces = {reg: load_carbon_data(reg, batch_start_bound, batch_end_bound) for reg in REGIONS}
     start_naive = batch_start_bound.replace(tzinfo=None)
     stats_to_display = calculate_standardized_stats(total_manifest, all_traces, start_naive, total_requested_tasks)
 
-    # 7. VISUALIZE
-    batch_id = f"batch_{HEURISTIC}_{dt.datetime.now().strftime('%H%M%S')}"
-    
+    # Save the chosen workflow order + per-task region assignment so this can
+    # be diffed against Oracle's choice for the same sub-batch.
+    save_chosen_path(
+        batch_label=batch_label or f"alg4_{heuristic}_unlabeled",
+        algorithm=f"Alg4_Batch_{heuristic}",
+        order_run_ids=[wf['run_id'] for wf in queue],
+        task_regions={
+            f"{run_id}::{tid}": tdata['region']
+            for run_id, plan in batch_results.items()
+            for tid, tdata in (plan or {}).items()
+        },
+        exec_carbon_g=stats_to_display.get('total_carbon', 0.0),
+        transfer_carbon_g=stats_to_display.get('total_transfer_carbon', 0.0),
+        extra={"heuristic": heuristic},
+    )
+
+    # Visualize
+    batch_id = f"batch_{heuristic}_{dt.datetime.now().strftime('%H%M%S')}"
     plot_optimization_window_heatmap(
-        total_manifest, 
-        all_traces, 
-        batch_start_bound, 
-        batch_end_bound, 
-        batch_id, 
+        total_manifest,
+        all_traces,
+        batch_start_bound,
+        batch_end_bound,
+        batch_id,
         stats=stats_to_display
     )
 
     return batch_results
+
+
+def plan_oracle(dag_runs_metadata, source_region=REGIONS[0], batch_label=None):
+    """
+    ORACLE SCHEDULER (Strict Carbon Minimization)
+    """
+    initial_cluster_state = load_cluster_state()
+
+    all_subs, all_dls, total_requested_tasks = [], [], 0
+    for wf in dag_runs_metadata:
+        s, d = wf['submission'], wf['deadline']
+        dl_dt = dt.datetime.fromisoformat(d) if isinstance(d, str) else d
+        all_dls.append(dl_dt.replace(tzinfo=None))
+        sub_dt = dt.datetime.fromisoformat(s) if isinstance(s, str) else s
+        all_subs.append(sub_dt.replace(tzinfo=None))
+        total_requested_tasks += len(wf['tasks'])
+
+    batch_start_bound = min(all_subs)
+    batch_end_bound = max(all_dls)
+
+    total_perms = math.factorial(len(dag_runs_metadata))
+    print(f"\n[ORACLE] Batch Window: {batch_start_bound} to {batch_end_bound} | "
+          f"Total Requested Tasks: {total_requested_tasks}")
+    print(f"[ORACLE] Testing all {total_perms} possible orderings for lowest carbon...")
+
+    best_carbon      = float('inf')
+    best_results     = {}
+    best_manifest    = {}
+    best_order       = []
+    best_stats       = {}
+    best_scratchpad  = None
+
+    for queue in itertools.permutations(dag_runs_metadata):
+
+        scratchpad     = copy.deepcopy(initial_cluster_state)
+        batch_results  = {}
+        total_manifest = {}
+
+        for workflow in queue:
+            wf_submission = workflow['submission']
+            wf_submission = (dt.datetime.fromisoformat(wf_submission)
+                              if isinstance(wf_submission, str) else wf_submission)
+
+            plan = plan_workflow_alg3(
+                workflow['run_id'],
+                wf_submission,
+                workflow['deadline'],
+                workflow['tasks'],
+                workflow['edges'],
+                workflow['sla'],
+                in_memory_state=scratchpad,
+                source_region=source_region
+            )
+
+            # MATCH ALG4 BEHAVIOR: Just skip the workflow if Alg3 returns an empty plan
+            # Do NOT break and ruin the entire permutation
+            if not plan:
+                batch_results[workflow['run_id']] = {}
+                continue
+
+            batch_results[workflow['run_id']] = plan
+
+            for tid, tdata in plan.items():
+                unique_key = f"{workflow['run_id']}_{tid}"
+                total_manifest[unique_key] = tdata
+
+                start_dt = dt.datetime.fromisoformat(tdata['start']).replace(tzinfo=None)
+                reg = tdata['region']
+                scratchpad = update_scratchpad(scratchpad, reg, start_dt, tdata['dur'], tdata['cores'])
+
+        # Skip if literally nothing was scheduled in this ordering
+        if not total_manifest:
+            continue
+
+        all_traces = {reg: load_carbon_data(reg, batch_start_bound, batch_end_bound) for reg in REGIONS}
+        start_naive = batch_start_bound.replace(tzinfo=None)
+        stats = calculate_standardized_stats(total_manifest, all_traces, start_naive, total_requested_tasks)
+
+        # Compare the full carbon impact, including network transfer cost.
+        ordering_carbon = stats.get(
+            'total_carbon_with_transfer',
+            stats.get('total_carbon', float('inf')),
+        )
+        if ordering_carbon < best_carbon:
+            best_carbon     = ordering_carbon
+            best_results    = batch_results
+            best_manifest   = total_manifest
+            best_order      = [wf['run_id'] for wf in queue]
+            best_stats      = stats
+            best_scratchpad = scratchpad
+
+    if not best_results:
+        print("[ORACLE] WARNING: No valid ordering found across all permutations.")
+        return {}
+
+    print(f"[ORACLE] Evaluation complete. Winner ({total_perms} orderings tested): "
+          f"{round(best_carbon, 2)}gCO2eq (execution + transfer)")
+
+    save_cluster_state(best_scratchpad)
+
+    batch_id = f"oracle_{dt.datetime.now().strftime('%H%M%S')}"
+    plot_optimization_window_heatmap(
+        best_manifest,
+        {reg: load_carbon_data(reg, batch_start_bound, batch_end_bound) for reg in REGIONS},
+        batch_start_bound,
+        batch_end_bound,
+        batch_id,
+        stats=best_stats
+    )
+
+    save_chosen_path(
+        batch_label=batch_label or "oracle_unlabeled",
+        algorithm="Oracle",
+        order_run_ids=best_order,
+        task_regions={
+            f"{run_id}::{tid}": tdata['region']
+            for run_id, plan in best_results.items()
+            for tid, tdata in (plan or {}).items()
+        },
+        exec_carbon_g=best_stats.get('total_carbon', 0.0),
+        transfer_carbon_g=best_stats.get('total_transfer_carbon', 0.0),
+        extra={"permutations_tested": total_perms},
+    )
+
+    return best_results
+
 
 def get_safe_plan_path(run_id):
     safe_id = run_id.replace(":", "_").replace("+", "_")
@@ -1773,38 +2289,13 @@ def has_capacity(region, start_time, duration, cores, file_path=CLUSTER_FILE):
         
         usage = cluster.get(region, {}).get(t_str, 0)
         
-        print(f"[CAPACITY CHECK] {region} at {t_str} | Current: {usage} | Request: {cores} | Limit: {TOTAL_CORES_PER_REGION}")
+        print(f"[CAPACITY CHECK] {region} at {t_str} | Current: {usage} | Request: {cores} | Limit: {CORES_LIMIT}")
         
-        if usage + cores > TOTAL_CORES_PER_REGION:
+        if usage + cores > CORES_LIMIT:
             return False
     return True
 
-def check_physical_hardware_limits(current_state, region, start_hour, path, TOTAL_CORES_PER_REGION, naive_submission):
-    """
-    Validates if a path physically fits into the remaining cluster cores
-    without exceeding 100% hardware utilization.
 
-    NOTE: This function is functionally equivalent to calling:
-        has_capacity_for_path(..., cap_factor=1.0)
-    which already exists below. Kept here in case it is referenced externally,
-    but consider consolidating callers to use has_capacity_for_path directly.
-    """
-    current_offset = start_hour
-    
-    for pt in path['tasks']:
-        for h in range(pt['dur']):
-            slot_time = naive_submission + dt.timedelta(hours=current_offset + h)
-            ts_key = slot_time.replace(minute=0, second=0, microsecond=0).isoformat()
-            
-            current_usage = current_state.get(region, {}).get(ts_key, 0)
-            
-            # ABSOLUTE HARDWARE CEILING
-            if current_usage + pt['cores'] > TOTAL_CORES_PER_REGION:
-                return False
-                
-        current_offset += pt['dur']
-        
-    return True
 
 def lock_resources(region, start_time, duration, cores, file_path=CLUSTER_FILE):
     data = {}
@@ -1840,7 +2331,7 @@ def task_policy(task):
 
         if not os.path.exists(plan_path):
             
-            # --- PATH A: INSTANT PLANNING (Alg 1, 2, 3, 5, 6, 7) ---
+            # --- PATH A: INSTANT PLANNING (Alg 1, 2, 3, 5, 6, 7, 8) ---
             if ACTIVE_ALGORITHM in [1, 2, 3, 5, 6, 7]:
                 # Extract metadata
                 sub_time = dr.start_date if dr.start_date else dt.datetime.now(dt.timezone.utc)
@@ -1866,10 +2357,50 @@ def task_policy(task):
                 elif ACTIVE_ALGORITHM == 6:
                     plan_baseline_B(dr.run_id, sub_time, deadline, tasks, edges, load_cluster_state())
                 elif ACTIVE_ALGORITHM == 7:
-                    plan_baseline_atomic(dr.run_id, sub_time, deadline, tasks, edges, load_cluster_state())
-
+                    plan_atomic(dr.run_id, sub_time, deadline, tasks, edges, load_cluster_state())
+               
             # --- PATH B: BATCH PLANNING (Alg 4) ---
             elif ACTIVE_ALGORITHM == 4:
+                reg_file = os.path.join(WAITING_ROOM_DIR, f"{dr.run_id}.json")
+                
+                # 1. Register
+                if not os.path.exists(reg_file):
+                    metadata = {
+                        "run_id": dr.run_id,
+                        "submission": dr.start_date.isoformat() if dr.start_date else dt.datetime.now(dt.timezone.utc).isoformat(),
+                        "deadline": dr.conf.get('deadline_iso', (dt.datetime.now() + dt.timedelta(hours=24)).isoformat()),
+                        "tasks": dr.conf.get('workflow_structure', []),
+                        "edges": dr.conf.get('edges', []),
+                        "sla": dr.conf.get('sla_level', 95)
+                    }
+                    with open(reg_file, 'w') as f:
+                        json.dump(metadata, f)
+                    print(f"[WAITING ROOM] {dr.run_id} entered the queue.")
+
+                # 2. Check Queue
+                waiting_files = [f for f in os.listdir(WAITING_ROOM_DIR) if f.endswith('.json')]
+                
+                if len(waiting_files) >= BATCH_SIZE:
+                    # 3. Leader Election
+                    lock_file = os.path.join(WAITING_ROOM_DIR, "leader.lock")
+                    try:
+                        with open(lock_file, "w") as lf:
+                            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            
+                            # We are the leader, run Alg 4 for everyone
+                            run_batch_coordinator(waiting_files)
+                            
+                            fcntl.flock(lf, fcntl.LOCK_UN)
+                            os.remove(lock_file)
+                    except (BlockingIOError, IOError):
+                        pass # Someone else is coordinating
+                
+                # 4. If we didn't plan it yet (either waiting for peers, or waiting for leader to finish), reschedule
+                if not os.path.exists(plan_path):
+                    raise AirflowRescheduleException(
+                        reschedule_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=60)
+                    )
+            elif ACTIVE_ALGORITHM == 8:
                 reg_file = os.path.join(WAITING_ROOM_DIR, f"{dr.run_id}.json")
                 
                 # 1. Register
@@ -1944,7 +2475,10 @@ def run_batch_coordinator(waiting_files):
             continue
             
     # Run Algorithm 4
-    plan_batch_alg4(batch_data)
+    if ACTIVE_ALGORITHM == 8:
+        plan_oracle(batch_data)
+    else:
+        plan_batch_alg4(batch_data)
 
     # Clear the waiting room
     for f_name in waiting_files:
