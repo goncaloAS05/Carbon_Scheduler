@@ -480,7 +480,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
             alg_suffix = "base_temp_lwf"
         elif alg_id == 15:
             alg_suffix = "base_spat_lwf"
-            else:
+        else:
             alg_suffix = "oracle"
 
         # Sort strictly by Alibaba arrival order
