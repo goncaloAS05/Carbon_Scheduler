@@ -72,6 +72,8 @@ ALG_COLORS = {
     'BaselineB_LocalFirst':  '#BA7517',
     'BaselineC_Atomic':      '#D4537E',
     'Oracle':                '#1A1A2E',
+    'base_temp_lwf':         "#BA4217",
+    'base_spat_lwf':         "#17BA3A",
 }
 
 ALG_MARKERS = {
@@ -131,6 +133,7 @@ def plot_quadrants(df: pd.DataFrame, out_dir: str):
         Draw the four quadrant regions with background shading and label them.
         Green = desirable, red = undesirable, yellow = mixed.
         """
+
         x_mid = x_means.mean()
         y_mid = y_means.mean()
         xmin, xmax = ax.get_xlim()
@@ -200,12 +203,21 @@ def plot_quadrants(df: pd.DataFrame, out_dir: str):
                     ha='center', va='center', fontsize=10, color='#666')
             ax.set_axis_off()
         else:
-            # Draw quadrant after setting limits so they're stable
-            pad_x = (max(x_vals) - min(x_vals)) * 0.15 if x_vals else 1
-            pad_y = (max(y_vals) - min(y_vals)) * 0.15 if y_vals else 1
-            ax.set_xlim(min(x_vals) - pad_x, max(x_vals) + pad_x)
-            ax.set_ylim(min(y_vals) - pad_y, max(y_vals) + pad_y)
+            # 1. Encontrar o valor máximo para garantir que o zero fica no centro do ecrã
+            max_x = max(x_vals) * 1.5 if x_vals else 1
+            max_y = max(y_vals) * 1.5 if y_vals else 1
+            
+            # 2. Set the origin (0,0) to the bottom-left corner
+            ax.set_xlim(0, max_x)
+            ax.set_ylim(0, max_y)
 
+            # 3. Apply symmetric log scale (so starting exactly at 0 remains mathematically valid)
+            # You can adjust 'linthresh' if the scale transition looks weird for your specific data range
+            ax.set_xscale('symlog', linthresh=1.0)
+            ax.set_yscale('symlog', linthresh=1.0)
+
+            # 4. Draw the quadrants 
+            # (Note: since x_mid and y_mid are 0, this will simply shade the entire plot based on your 'is_good' variables)
             draw_quadrant(ax, np.array(x_vals), np.array(y_vals),
                           x_label, y_label, x_low_is_good, y_low_is_good)
 
@@ -478,7 +490,18 @@ if __name__ == "__main__":
     print(f"[ANALYSIS] Loading results from {args.results} ...")
     df = pd.read_csv(args.results)
     df["plan_produced"] = df["plan_produced"].astype(str).str.lower().isin(['true', '1'])
-    print(f"[ANALYSIS] {len(df)} rows loaded. Generating quadrant plots...")
+    id_col = "run_id" if "run_id" in df.columns else df.columns[0]
+
+    # Find the exact runs the Oracle has completed
+    oracle_completed_runs = df[df["algorithm"] == "Base_Spat_Batch_LWF"][id_col].unique()
+    
+    # Filter the entire dataset to only include those specific runs
+    df = df[df[id_col].isin(oracle_completed_runs)]
+    
+    print(f"[ANALYSIS] Fairness Filter: Reduced dataset to {len(df)} rows representing {len(oracle_completed_runs)} matching workflows.")
+    # ---------------------------------------------------------
+
+    print(f"[ANALYSIS] {len(df)} rows ready. Generating quadrant plots...")
     plot_quadrants(df, args.out_dir)
 
     # ── Permutation analysis ──────────────────────────────────────────────────
