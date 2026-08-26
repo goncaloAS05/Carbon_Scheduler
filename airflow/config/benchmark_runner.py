@@ -36,7 +36,6 @@ import copy
 import time
 import argparse
 import datetime as dt
-import traceback
 import types
 from pathlib import Path
 
@@ -83,6 +82,8 @@ from airflow_local_settings import (
     PLAN_DIR,
     WAITING_ROOM_DIR,
     TOTAL_CORES_PER_REGION,
+    carbon_logger,
+    _log,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -170,8 +171,7 @@ def _call_algorithm(alg_id: int, workflow: dict,
         else:
             plan = None
     except Exception as e:
-        print(f"    [ERROR] alg{alg_id} / {run_id}: {e}")
-        traceback.print_exc()
+        carbon_logger.exception(f"    [ERROR] alg{alg_id} / {run_id}: {e}")
         plan = None
 
     return plan
@@ -303,8 +303,7 @@ def run_batch_engine(workloads: list, base_submission: dt.datetime, deadline_h: 
         if batch_plan:
             merged_plan.update(batch_plan)
     except Exception as e:
-        print(f"    [ERROR] batch execution error for alg {alg_id}: {e}")
-        traceback.print_exc()
+        carbon_logger.exception(f"    [ERROR] batch execution error for alg {alg_id}: {e}")
     finally:
         for fname in written:
             try:
@@ -365,11 +364,11 @@ def run_benchmark(workloads: list, algorithms: list[int],
                         seen_combos.add(key)
                         combos.append((deadline_h, scenario, load_label))
 
-        print(f"[RUNNER] Single-workflow evaluation will run {len(single_algs)} algorithms over {len(combos)} scenario/load combinations.")
+        _log(f"[RUNNER] Single-workflow evaluation will run {len(single_algs)} algorithms over {len(combos)} scenario/load combinations.")
         for alg_id in single_algs:
             alg_label = ALGORITHM_MAP[alg_id][0]
-            print(f"[RUNNER] Starting sequential simulation block for {alg_label} ...")
-            print(f"[RUNNER] {alg_label} will evaluate {len(combos)} scenario/load combos in up to {len(workloads)} workflows.")
+            _log(f"[RUNNER] Starting sequential simulation block for {alg_label} ...")
+            _log(f"[RUNNER] {alg_label} will evaluate {len(combos)} scenario/load combos in up to {len(workloads)} workflows.")
             alg_start = time.perf_counter()
 
             for deadline_h, scenario, load_label in combos:
@@ -386,7 +385,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
                 for i in range(0, len(batch_wfs), BATCH_SIZE):
                     sub_batch = batch_wfs[i:i + BATCH_SIZE]
                     batch_num = i // BATCH_SIZE + 1
-                    print(f"  [{alg_label}] scenario={scenario['label']} load={load_label} batch={batch_num}/{total_batches} size={len(sub_batch)}")
+                    _log(f"  [{alg_label}] scenario={scenario['label']} load={load_label} batch={batch_num}/{total_batches} size={len(sub_batch)}")
 
                     load_factor = LOAD_SCENARIOS[load_label]
                     bg_seed = hash((deadline_h, load_label, i)) % 10000
@@ -422,7 +421,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
                         plan_is_empty = plan is not None and len(plan) == 0
                         plan_produced = plan is not None and len(plan) > 0
 
-                        print(f"    [TIMING] {alg_label} {wf['run_id']} {scenario['label']} {load_label} -> {time_to_schedule_s:.3f}s")
+                        _log(f"    [TIMING] {alg_label} {wf['run_id']} {scenario['label']} {load_label} -> {time_to_schedule_s:.3f}s")
 
                         row = {
                             "run_id":           wf["run_id"],
@@ -468,7 +467,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
     # ── Multi-Workflow Batch Execution Algorithms (4, 42, 8, 9, 13, 15) ──────────────────
     for alg_id in batch_alg_ids:
         alg_label = ALGORITHM_MAP[alg_id][0]
-        print(f"[RUNNER] Starting {alg_label} (batched across workloads)...")
+        _log(f"[RUNNER] Starting {alg_label} (batched across workloads)...")
         batch_start = time.perf_counter()
 
         if alg_id == 4:
@@ -481,7 +480,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
             alg_suffix = "base_temp_lwf"
         elif alg_id == 15:
             alg_suffix = "base_spat_lwf"
-        else:
+            else:
             alg_suffix = "oracle"
 
         # Sort strictly by Alibaba arrival order
@@ -512,7 +511,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
 
                     all_traces = {reg: load_carbon_data(reg, submission, batch_trace_end) for reg in REGIONS}
 
-                    print(f"  [{alg_label}] scenario={scenario['label']} load={load_label} batch={batch_num}/{total_batches} size={len(sub_batch)}")
+                    _log(f"  [{alg_label}] scenario={scenario['label']} load={load_label} batch={batch_num}/{total_batches} size={len(sub_batch)}")
 
                     load_factor  = LOAD_SCENARIOS[load_label]
                     bg_seed      = hash((load_label, alg_id, i)) % 10000
@@ -541,7 +540,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
                     avg_time = alg_total_time / alg_combo_count
                     combo_counter += 1
 
-                    print(f"    [PROGRESS] combo={combo_counter} alg={alg_label} elapsed={batch_time_to_schedule_s:.1f}s avg={avg_time:.1f}s")
+                    _log(f"    [PROGRESS] combo={combo_counter} alg={alg_label} elapsed={batch_time_to_schedule_s:.1f}s avg={avg_time:.1f}s")
 
                     post_batch_state = load_cluster_state()
                     with open(os.path.join(states_dir, f"{batch_base_name}_after.json"), "w") as f:
@@ -589,12 +588,12 @@ def run_benchmark(workloads: list, algorithms: list[int],
                         rows.append(row)
                         _flush_results()
 
-        print(f"[RUNNER] Completed {alg_label} in {time.perf_counter() - batch_start:.2f}s over {alg_combo_count} batched combos.")
+        _log(f"[RUNNER] Completed {alg_label} in {time.perf_counter() - batch_start:.2f}s over {alg_combo_count} batched combos.")
 
     df = pd.DataFrame(rows)
     out_csv = os.path.join(out_dir, "benchmark_results.csv")
     df.to_csv(out_csv, index=False)
-    print(f"[RUNNER] Wrote benchmark results to {out_csv}")
+    _log(f"[RUNNER] Wrote benchmark results to {out_csv}")
     return df
 
 
@@ -605,7 +604,7 @@ def run_benchmark(workloads: list, algorithms: list[int],
 def plot_results(df: pd.DataFrame, out_dir: str):
     df_ok = df[df["plan_produced"] == True].copy()
     if df_ok.empty:
-        print("[PLOTS] Warning: No valid runs produced a plan. Skipping plots.")
+        _log("[PLOTS] Warning: No valid runs produced a plan. Skipping plots.", 30)
         return
 
     alg_order = sorted(df_ok["algorithm"].unique())
@@ -691,7 +690,7 @@ def plot_grouped_workload_bars(df: pd.DataFrame, out_dir: str):
     save_path = os.path.join(out_dir, "plot_workload_grouped_bars.png")
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"[PLOTS] Grouped workload bar chart generated successfully -> {save_path}")
+    _log(f"[PLOTS] Grouped workload bar chart generated successfully -> {save_path}")
 
 
 def print_summary_table(df: pd.DataFrame):
@@ -700,16 +699,16 @@ def print_summary_table(df: pd.DataFrame):
         return
     summary = df_ok.groupby("algorithm")[METRICS].mean().round(2).sort_values("total_carbon")
 
-    print("\n" + "═" * 90)
-    print("BENCHMARK SUMMARY  (mean across all workflows × scenarios)")
-    print("═" * 90)
-    print(summary.to_string())
-    print("═" * 90)
+    _log("\n" + "═" * 90)
+    _log("BENCHMARK SUMMARY  (mean across all workflows × scenarios)")
+    _log("═" * 90)
+    _log(summary.to_string())
+    _log("═" * 90)
 
     failed = df[df["plan_produced"] == False]
     if not failed.empty:
-        print(f"\n[WARNING] {len(failed)} runs produced no plan:")
-        print(failed[["run_id", "algorithm", "carbon_scenario"]].to_string(index=False))
+        _log(f"\n[WARNING] {len(failed)} runs produced no plan:", 30)
+        _log(failed[["run_id", "algorithm", "carbon_scenario"]].to_string(index=False))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI Execution Engine
@@ -731,12 +730,12 @@ if __name__ == "__main__":
                         help="Background thread core block allocations")
     args = parser.parse_args()
 
-    print(f"[RUNNER] Loading workloads from {args.workloads} ...")
+    _log(f"[RUNNER] Loading workloads from {args.workloads} ...")
     with open(args.workloads) as f:
         workloads = json.load(f)
-    print(f"[RUNNER] {len(workloads)} workflows loaded.")
-    print(f"[RUNNER] Target evaluation engines: {args.algorithms}")
-    print(f"[RUNNER] Destination storage path: {args.out_dir}\n")
+    _log(f"[RUNNER] {len(workloads)} workflows loaded.")
+    _log(f"[RUNNER] Target evaluation engines: {args.algorithms}")
+    _log(f"[RUNNER] Destination storage path: {args.out_dir}\n")
 
     df = run_benchmark(
         workloads=workloads,
@@ -749,4 +748,4 @@ if __name__ == "__main__":
     print_summary_table(df)
     plot_results(df, args.out_dir)
     plot_grouped_workload_bars(df, args.out_dir)
-    print("\n[RUNNER] Evaluation sequence execution finished.")
+    _log("\n[RUNNER] Evaluation sequence execution finished.")

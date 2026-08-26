@@ -2,6 +2,7 @@ import os
 import json
 import fcntl  
 import copy
+import logging
 import datetime as dt
 import math
 # REMOVED: 'from datetime import timedelta, datetime' — redundant since all usages
@@ -22,6 +23,22 @@ PLAN_DIR         = os.path.join(AIRFLOW_BASE_DIR, "plans", "")
 ORDERS_DIR       = os.path.join(AIRFLOW_BASE_DIR, "orders", "")
 HISTORY_FILE     = os.path.join(AIRFLOW_BASE_DIR, "task_history.json")
 WAITING_ROOM_DIR = os.path.join(AIRFLOW_BASE_DIR, "waiting_room", "")
+LOG_DIR          = os.path.join(AIRFLOW_BASE_DIR, "logs")
+CARBON_LOG_FILE  = os.path.join(LOG_DIR, "carbon_scheduler.log")
+
+os.makedirs(LOG_DIR, exist_ok=True)
+
+carbon_logger = logging.getLogger("carbon_scheduler")
+if not carbon_logger.handlers:
+    file_handler = logging.FileHandler(CARBON_LOG_FILE, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    carbon_logger.addHandler(file_handler)
+carbon_logger.setLevel(logging.INFO)
+carbon_logger.propagate = False
+
+
+def _log(message, level=logging.INFO):
+    carbon_logger.log(level, message)
 
 # --- Simulation Engine Parameters ---
 DEBUG = True
@@ -386,7 +403,7 @@ def save_cluster_state(state_dict, file_path=CLUSTER_FILE):
         with open(file_path, 'w') as f:
             json.dump(state_dict, f, indent=4)
     except IOError as e:
-        print(f"Error saving cluster state: {e}")
+        _log(f"Error saving cluster state: {e}", logging.ERROR)
 
 def get_dynamic_critical_path(tasks_metadata, edges=None, sla_level=None):
     """
@@ -468,10 +485,10 @@ def _apply_late_carbon_penalty(plan, all_traces, stats, multiplier):
 def plan_baseline_A(run_id, submission, deadline, tasks, edges, in_memory_state, source_region=None):
     """Baseline A: Immediate Schedule (Earliest Start across all regions)"""
     if source_region is None:
-        print(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.")
+        _log(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.", logging.WARNING)
         source_region = REGIONS[0]
 
-    print(f"[BASELINE A] Planning {run_id} originating from {source_region}...")
+    _log(f"[BASELINE A] Planning {run_id} originating from {source_region}.")
     plan = {}
 
     sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(submission)
@@ -518,7 +535,7 @@ def plan_baseline_A(run_id, submission, deadline, tasks, edges, in_memory_state,
 
         # ── Phase 2: fallback past deadline (Uncapped Horizon up to 30 days out) ────────────────
         if best_start is None:
-            print(f"[BASELINE A] Task {task['id']} over core limit inside deadline. Scheduling late...")
+            _log(f"[BASELINE A] Task {task['id']} over core limit inside deadline. Scheduling late...")
             is_late = True
             
             # Use an extended lookahead deadline limit (720 hours)
@@ -581,10 +598,10 @@ def plan_baseline_A(run_id, submission, deadline, tasks, edges, in_memory_state,
 def plan_baseline_B(run_id, submission, deadline, tasks, edges, in_memory_state, source_region=None):
     """Baseline B: Local-First (Default Origin Location)"""
     if source_region is None:
-        print(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.")
+        _log(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.", logging.WARNING)
         source_region = REGIONS[0]
 
-    print(f"[BASELINE B] Planning {run_id} local to region {source_region}...")
+    _log(f"[BASELINE B] Planning {run_id} local to region {source_region}...")
     plan = {}
 
     sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(str(submission))
@@ -638,7 +655,7 @@ def plan_baseline_B(run_id, submission, deadline, tasks, edges, in_memory_state,
 
         # ── Phase 2: Fallback Past Deadline (Up to 30 days out) ──
         if best_start is None:
-            print(f"[BASELINE B] Task {task['id']} over core limit inside deadline. Scheduling late...")
+            _log(f"[BASELINE B] Task {task['id']} over core limit inside deadline. Scheduling late...")
             is_late = True
             extended_deadline = parent_finish + dt.timedelta(hours=720)
             
@@ -702,7 +719,7 @@ def plan_baseline_task_temporal_only(run_id, submission_time, deadline_date, tas
     - Each task independently searches for the greenest time slot between its arrival and the deadline.
     - Incorporates exact capacity checking (CORES_LIMIT).
     """
-    print(f"[BASELINE TEMPORAL] Planning with high-fidelity tracking | Workload: {run_id}")
+    _log(f"[BASELINE TEMPORAL] Planning with high-fidelity tracking | Workload: {run_id}")
     plan_path = get_safe_plan_path(f"base_temp_{run_id}")
     if os.path.exists(plan_path):
         with open(plan_path, 'r') as f: return json.load(f)
@@ -788,7 +805,7 @@ def plan_baseline_task_temporal_only(run_id, submission_time, deadline_date, tas
         current_ready_time = best_task_start.replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=t['dur'])
 
     # 4. Final Output and State Saving Pipeline
-    print(f"\n[BASELINE TEMPORAL REPORT] Workflow: {run_id}")
+    _log(f"\n[BASELINE TEMPORAL REPORT] Workflow: {run_id}")
     save_cluster_state(temp_search_state)
     with open(plan_path, 'w') as f: json.dump(manifest, f, indent=4)
     return manifest
@@ -800,7 +817,7 @@ def plan_baseline_task_spatial_only(run_id, submission_time, deadline_date, task
     - Evaluates carbon intensity strictly at task/data arrival time in each region.
     - Respects DAG dependencies (`depends_on`) and cross-region data transfers.
     """
-    print(f"[BASELINE SPATIAL] Planning with high-fidelity tracking | Workload: {run_id}")
+    _log(f"[BASELINE SPATIAL] Planning with high-fidelity tracking | Workload: {run_id}")
     plan_path = get_safe_plan_path(f"base_spat_{run_id}")
     if os.path.exists(plan_path):
         with open(plan_path, 'r') as f: return json.load(f)
@@ -919,7 +936,7 @@ def plan_baseline_task_spatial_only(run_id, submission_time, deadline_date, task
         task_end_times[t['id']] = best_task_start.replace(tzinfo=dt.timezone.utc) + dt.timedelta(hours=t['dur'])
 
     # 4. Final Output, Heatmap, and State Saving Pipeline
-    print(f"\n[BASELINE SPATIAL REPORT] Workflow: {run_id}")
+    _log(f"\n[BASELINE SPATIAL REPORT] Workflow: {run_id}")
 
     # Calculate stats & generate optimization heatmap
     sub_naive = submission_time.replace(tzinfo=None)
@@ -942,10 +959,10 @@ def plan_baseline_task_spatial_only(run_id, submission_time, deadline_date, task
 
 def plan_atomic(run_id, submission, deadline, tasks, edges, in_memory_state, source_region=None):
     if source_region is None:
-        print(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.")
+        _log(f"[WARNING] No source region provided for {run_id}. Defaulting to {REGIONS[0]}.", logging.WARNING)
         source_region = REGIONS[0]
 
-    print(f"[BASELINE ATOMIC] Planning continuous block for {run_id} from {source_region}...")
+    _log(f"[BASELINE ATOMIC] Planning continuous block for {run_id} from {source_region}...")
     plan = {}
 
     sub_dt = submission if isinstance(submission, dt.datetime) else dt.datetime.fromisoformat(str(submission))
@@ -1032,7 +1049,7 @@ def plan_atomic(run_id, submission, deadline, tasks, edges, in_memory_state, sou
     # of failing. Carbon cost for these hours is multiplied by the penalty.
     # ── 2. Fallback: schedule past deadline with a carbon penalty ─────────────
     if best_start is None:
-        print(f"[ATOMIC] No valid block within deadline for {run_id}. "
+        _log(f"[ATOMIC] No valid block within deadline for {run_id}. "
               f"Staying in {source_region} and scheduling late (no region change — "
               f"transfer time would make it even later).")
 
@@ -1073,7 +1090,7 @@ def plan_atomic(run_id, submission, deadline, tasks, edges, in_memory_state, sou
 
         # Absolute last resort
         if best_start is None:
-            print(f"[ATOMIC] Last resort: forcing {run_id} to submission time in {source_region}.")
+            _log(f"[ATOMIC] Last resort: forcing {run_id} to submission time in {source_region}.")
             best_region  = source_region
             best_start   = sub_dt
             best_is_late = True
@@ -1142,9 +1159,9 @@ def plan_atomic_oracle(dag_runs_metadata, source_region=REGIONS[0], batch_label=
     batch_end_bound = max(all_dls)
 
     total_perms = math.factorial(len(dag_runs_metadata))
-    print(f"\n[Atomic ORACLE] Batch Window: {batch_start_bound} to {batch_end_bound} | "
+    _log(f"\n[Atomic ORACLE] Batch Window: {batch_start_bound} to {batch_end_bound} | "
           f"Total Requested Tasks: {total_requested_tasks}")
-    print(f"[Atomic ORACLE] Testing all {total_perms} possible orderings for lowest carbon...")
+    _log(f"[Atomic ORACLE] Testing all {total_perms} possible orderings for lowest carbon...")
 
     best_carbon      = float('inf')
     best_results     = {}
@@ -1212,10 +1229,10 @@ def plan_atomic_oracle(dag_runs_metadata, source_region=REGIONS[0], batch_label=
             best_scratchpad = scratchpad
 
     if not best_results:
-        print("[Atomic ORACLE] WARNING: No valid ordering found across all permutations.")
+        _log("[Atomic ORACLE] WARNING: No valid ordering found across all permutations.", logging.WARNING)
         return {}
 
-    print(f"[Atomic ORACLE] Evaluation complete. Winner ({total_perms} orderings tested): "
+    _log(f"[Atomic ORACLE] Evaluation complete. Winner ({total_perms} orderings tested): "
           f"{round(best_carbon, 2)}gCO2eq (execution + transfer)")
 
     save_cluster_state(best_scratchpad)
@@ -2084,18 +2101,18 @@ def plan_workflow_alg1(run_id, submission_time, deadline_date, tasks_metadata, s
     elif pt_intensities:
         available_times = sorted(pt_intensities.keys())
         pt_start_intensity = pt_intensities[available_times[0]]
-        print(f"[DEBUG] Exact time {sub_naive} not in {source_region} logs. Using closest: {available_times[0]}")
+        _log(f"[DEBUG] Exact time {sub_naive} not in {source_region} logs. Using closest: {available_times[0]}")
     else:
         pt_start_intensity = 400 # Realistic fallback for PT if logs are empty
-        print(f"[DEBUG] {source_region} logs empty for this window. Using global fallback.")
+        _log(f"[DEBUG] {source_region} logs empty for this window. Using global fallback.")
 
     local_execution_carbon = pt_start_intensity * (total_duration * total_cores)
     carbon_saved = local_execution_carbon - best_avg * (total_duration * total_cores)
     # Save and lock resources immediately (Exclusivity)
-    print(f"\n[ALGORITHM 1 REPORT]")
-    print(f"  - Local {source_region} Start Intensity: {pt_start_intensity} g/kWh")
-    print(f"  - Winner {best_reg} Start Intensity: {best_avg} g/kWh")
-    print(f"  - Net Savings: {round(carbon_saved, 2)} gCO2eq")
+    _log("\n[ALGORITHM 1 REPORT]")
+    _log(f"  - Local {source_region} Start Intensity: {pt_start_intensity} g/kWh")
+    _log(f"  - Winner {best_reg} Start Intensity: {best_avg} g/kWh")
+    _log(f"  - Net Savings: {round(carbon_saved, 2)} gCO2eq")
 
     stats = calculate_standardized_stats(manifest, {reg: load_carbon_data(reg, submission_time, deadline_date) for reg in REGIONS}, sub_naive, len(tasks_metadata))
 
@@ -2122,7 +2139,7 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
     - Incorporates data transfer time penalties and network carbon taxes.
     - Uses high-fidelity closest-match lookups to prevent carbon calculation failures.
     """
-    print(f"[ALG 2] Planning with high-fidelity tracking for {data_size_gb}GB | Workload: {run_id}")
+    _log(f"[ALG 2] Planning with high-fidelity tracking for {data_size_gb}GB | Workload: {run_id}")
     plan_path = get_safe_plan_path(run_id)
     if os.path.exists(plan_path):
         with open(plan_path, 'r') as f: return json.load(f)
@@ -2155,18 +2172,18 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
         # Calculate data transfer overheads for this candidate region
         time_penalty, carbon_penalty = calculate_transfer_penalty(region, data_size_gb, source_region)
         eff_deadline = deadline_date - dt.timedelta(hours=time_penalty)
-        print(f"\n[DEBUG] Evaluating {region} | Transfer Time Penalty: {round(time_penalty, 2)}h | Carbon Penalty: {round(carbon_penalty, 2)}g | Effective Deadline: {eff_deadline} | Total Workflow Duration: {total_duration}h")
+        _log(f"\n[DEBUG] Evaluating {region} | Transfer Time Penalty: {round(time_penalty, 2)}h | Carbon Penalty: {round(carbon_penalty, 2)}g | Effective Deadline: {eff_deadline} | Total Workflow Duration: {total_duration}h")
         intensities = load_carbon_data(region, submission_time, eff_deadline)
         if not intensities: 
             continue
 
         window_hours = int((eff_deadline - submission_time).total_seconds() // 3600)
 
-        print(f"[DEBUG] Available hours in {region} for this workflow (after transfer penalty): {window_hours}h")
+        _log(f"[DEBUG] Available hours in {region} for this workflow (after transfer penalty): {window_hours}h")
         # Scan available start windows for the entire block
         for offset in range(max(1, int(window_hours - total_duration + 1))):
             start_cand = submission_time + dt.timedelta(hours=offset + time_penalty)
-            print(f"[DEBUG] Testing {region} with candidate start {start_cand} (offset {offset}h + transfer penalty {round(time_penalty, 2)}h)")
+            _log(f"[DEBUG] Testing {region} with candidate start {start_cand} (offset {offset}h + transfer penalty {round(time_penalty, 2)}h)")
             sim_carbon, can_fit, cand_manifest = 0, True, {}
             temp_search_state = copy.deepcopy(in_memory_state)
             
@@ -2227,9 +2244,9 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
 
     # 4. Final Output, Graphics, and State Saving Pipeline
     if best_reg:
-        print(f"\n[ALGORITHM 2 REPORT] Workflow: {run_id}")
-        print(f"{'Task ID':<15} | {'Region':<8} | {'Saved (g)':<10} | {'Reduction %'}")
-        print("-" * 50)
+        _log(f"\n[ALGORITHM 2 REPORT] Workflow: {run_id}")
+        _log(f"{'Task ID':<15} | {'Region':<8} | {'Saved (g)':<10} | {'Reduction %'}")
+        _log("-" * 50)
         
         all_regions_window_data = {reg: load_carbon_data(reg, submission_time, deadline_date) for reg in REGIONS}
 
@@ -2248,14 +2265,14 @@ def plan_workflow_alg2(run_id, submission_time, deadline_date, tasks_metadata, d
         actual_sum_baseline_g = 0
         
         for tid, d in best_manifest.items():
-            print(f"{tid:<15} | {d['region']:<8} | {d['saved_g']:<10} | {d['pct']}%")
+            _log(f"{tid:<15} | {d['region']:<8} | {d['saved_g']:<10} | {d['pct']}%")
             actual_sum_saved_g += d['saved_g']
             actual_sum_baseline_g += (d['saved_g'] / (d['pct']/100)) if d['pct'] > 0 else 0
         
         total_reduction_pct = (actual_sum_saved_g / actual_sum_baseline_g * 100) if actual_sum_baseline_g > 0 else 0
         
-        print(f"--- TOTAL SAVED (Execution): {round(actual_sum_saved_g, 2)}g ({round(total_reduction_pct, 1)}%) ---\n")
-        print(f"--- TOTAL if ran in PT: {round(actual_sum_baseline_g, 2)}g ---\n")
+        _log(f"--- TOTAL SAVED (Execution): {round(actual_sum_saved_g, 2)}g ({round(total_reduction_pct, 1)}%) ---\n")
+        _log(f"--- TOTAL if ran in PT: {round(actual_sum_baseline_g, 2)}g ---\n")
         
         # Atomically secure physical resource tracks on the cluster state file
         current_cluster_state = load_cluster_state()
@@ -2287,10 +2304,10 @@ def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, e
     """
 
     if source_region is None:
-        print("[ALG 3] No source region provided. Defaulting to REGIONS[0].")
+        _log("[ALG 3] No source region provided. Defaulting to REGIONS[0].")
         source_region = REGIONS[0]
     else:
-        print(f"[ALG 3] Planning with source region: {source_region}")
+        _log(f"[ALG 3] Planning with source region: {source_region}")
 
     plan_path = get_safe_plan_path(run_id)
     if in_memory_state is None and os.path.exists(plan_path):
@@ -2330,7 +2347,7 @@ def plan_workflow_alg3(run_id, submission_time, deadline_date, tasks_metadata, e
     rle_index = preprocess_carbon_to_rle_buckets(all_regions_intensities, REGIONS, max_window_hours)
 
     workflow_fits = cp_duration_hours <= max_window_hours
-    print(f"[ALG3] Workflow {run_id} critical path duration: {cp_duration_hours}h | Window: {max_window_hours}h | Fits: {workflow_fits}")
+    _log(f"[ALG3] Workflow {run_id} critical path duration: {cp_duration_hours}h | Window: {max_window_hours}h | Fits: {workflow_fits}")
     if not workflow_fits:
         # print(f"[ALG3] Workflow {run_id} critical path ({cp_duration_hours}h) "
         #     f"exceeds window ({max_window_hours}h). Using late fallback strategy.")
@@ -2423,13 +2440,13 @@ def plan_batch_alg4(dag_runs_metadata, heuristic="EDF", source_region=REGIONS[0]
 
     # Sort the queue based on the requested Heuristic approach
     if heuristic == "EDF":
-        print("[BATCH PLANNER] Using Earliest Deadline First (EDF) heuristic.")
+        _log("[BATCH PLANNER] Using Earliest Deadline First (EDF) heuristic.")
         queue = sorted(
             dag_runs_metadata,
             key=lambda x: dt.datetime.fromisoformat(x['deadline']) if isinstance(x['deadline'], str) else x['deadline']
         )
     else:
-        print("[BATCH PLANNER] Using Longest Workflow First (LWF) heuristic.")
+        _log("[BATCH PLANNER] Using Longest Workflow First (LWF) heuristic.")
         queue = sorted(
             dag_runs_metadata,
             key=lambda x: sum(t['dur'] for t in x['tasks']) * max(t['cores'] for t in x['tasks']),
@@ -2450,7 +2467,7 @@ def plan_batch_alg4(dag_runs_metadata, heuristic="EDF", source_region=REGIONS[0]
 
     batch_start_bound = min(all_subs)
     batch_end_bound = max(all_dls)
-    print(f"[BATCH PLANNER] Batch Window: {batch_start_bound} to {batch_end_bound} | Total Requested Tasks: {total_requested_tasks}")
+    _log(f"[BATCH PLANNER] Batch Window: {batch_start_bound} to {batch_end_bound} | Total Requested Tasks: {total_requested_tasks}")
 
     batch_results = {}
     total_manifest = {}
@@ -2497,7 +2514,7 @@ def plan_batch_alg4(dag_runs_metadata, heuristic="EDF", source_region=REGIONS[0]
 
     # Guard against empty manifest before plotting
     if not total_manifest:
-        print("[BATCH PLANNER] WARNING: No tasks were planned. Skipping heatmap.")
+        _log("[BATCH PLANNER] WARNING: No tasks were planned. Skipping heatmap.", logging.WARNING)
         return batch_results
 
     # Statistics
@@ -2552,13 +2569,13 @@ def plan_batch_baseline(dag_runs_metadata, baseline_type="temporal", heuristic="
 
     # Sort the queue based on the requested Heuristic approach
     if heuristic == "EDF":
-        print(f"{prefix} Using Earliest Deadline First (EDF) heuristic.")
+        _log(f"{prefix} Using Earliest Deadline First (EDF) heuristic.")
         queue = sorted(
             dag_runs_metadata,
             key=lambda x: dt.datetime.fromisoformat(x['deadline']) if isinstance(x['deadline'], str) else x['deadline']
         )
     else:
-        print(f"{prefix} Using Longest Workflow First (LWF) heuristic.")
+        _log(f"{prefix} Using Longest Workflow First (LWF) heuristic.")
         queue = sorted(
             dag_runs_metadata,
             key=lambda x: sum(t['dur'] for t in x['tasks']) * max(t['cores'] for t in x['tasks']),
@@ -2579,7 +2596,7 @@ def plan_batch_baseline(dag_runs_metadata, baseline_type="temporal", heuristic="
 
     batch_start_bound = min(all_subs)
     batch_end_bound = max(all_dls)
-    print(f"{prefix} Batch Window: {batch_start_bound} to {batch_end_bound} | Total Requested Tasks: {total_requested_tasks}")
+    _log(f"{prefix} Batch Window: {batch_start_bound} to {batch_end_bound} | Total Requested Tasks: {total_requested_tasks}")
 
     batch_results = {}
     total_manifest = {}
@@ -2638,7 +2655,7 @@ def plan_batch_baseline(dag_runs_metadata, baseline_type="temporal", heuristic="
     save_cluster_state(global_scratchpad)
 
     if not total_manifest:
-        print(f"{prefix} WARNING: No tasks were planned. Skipping heatmap.")
+        _log(f"{prefix} WARNING: No tasks were planned. Skipping heatmap.", logging.WARNING)
         return batch_results
 
     # FIX: Extend stats_window_end to cover tasks that finish after batch_end_bound
@@ -2700,9 +2717,9 @@ def plan_oracle(dag_runs_metadata, source_region=REGIONS[0], batch_label=None):
     batch_end_bound = max(all_dls)
 
     total_perms = math.factorial(len(dag_runs_metadata))
-    print(f"\n[ORACLE] Batch Window: {batch_start_bound} to {batch_end_bound} | "
+    _log(f"\n[ORACLE] Batch Window: {batch_start_bound} to {batch_end_bound} | "
           f"Total Requested Tasks: {total_requested_tasks}")
-    print(f"[ORACLE] Testing all {total_perms} possible orderings for lowest carbon...")
+    _log(f"[ORACLE] Testing all {total_perms} possible orderings for lowest carbon...")
 
     best_carbon      = float('inf')
     best_results     = {}
@@ -2771,10 +2788,10 @@ def plan_oracle(dag_runs_metadata, source_region=REGIONS[0], batch_label=None):
             best_scratchpad = scratchpad
 
     if not best_results:
-        print("[ORACLE] WARNING: No valid ordering found across all permutations.")
+        _log("[ORACLE] WARNING: No valid ordering found across all permutations.", logging.WARNING)
         return {}
 
-    print(f"[ORACLE] Evaluation complete. Winner ({total_perms} orderings tested): "
+    _log(f"[ORACLE] Evaluation complete. Winner ({total_perms} orderings tested): "
           f"{round(best_carbon, 2)}gCO2eq (execution + transfer)")
 
     save_cluster_state(best_scratchpad)
@@ -2823,7 +2840,7 @@ def has_capacity(region, start_time, duration, cores, file_path=CLUSTER_FILE):
         
         usage = cluster.get(region, {}).get(t_str, 0)
         
-        print(f"[CAPACITY CHECK] {region} at {t_str} | Current: {usage} | Request: {cores} | Limit: {CORES_LIMIT}")
+        _log(f"[CAPACITY CHECK] {region} at {t_str} | Current: {usage} | Request: {cores} | Limit: {CORES_LIMIT}")
         
         if usage + cores > CORES_LIMIT:
             return False
@@ -2839,7 +2856,7 @@ def lock_resources(region, start_time, duration, cores, file_path=CLUSTER_FILE):
             
     if region not in data:
         data[region] = {}
-    print(f"[RESOURCE LOCK] Reserving {cores} cores in {region} from {start_time} for {duration} hours.")
+    _log(f"[RESOURCE LOCK] Reserving {cores} cores in {region} from {start_time} for {duration} hours.")
     base_time = start_time.replace(minute=0, second=0, microsecond=0, tzinfo=None)
         
     for h in range(int(duration)):
@@ -2875,9 +2892,9 @@ def task_policy(task):
                     for task in dr.dag.tasks:
                         for downstream_id in task.downstream_task_ids:
                             edges.append((task.task_id, downstream_id))
-                print(f"[METADATA] edges: {edges}")
+                _log(f"[METADATA] edges: {edges}")
                 sla = dr.conf.get('sla_level', 95)
-                print(f"{context}")
+                _log(f"{context}")
                 if ACTIVE_ALGORITHM == 1:
                     plan_workflow_alg1(dr.run_id, sub_time, deadline, tasks)
                 elif ACTIVE_ALGORITHM == 2:
@@ -2906,7 +2923,7 @@ def task_policy(task):
                     }
                     with open(reg_file, 'w') as f:
                         json.dump(metadata, f)
-                    print(f"[WAITING ROOM] {dr.run_id} entered the queue.")
+                    _log(f"[WAITING ROOM] {dr.run_id} entered the queue.")
 
                 # 2. Check Queue
                 waiting_files = [f for f in os.listdir(WAITING_ROOM_DIR) if f.endswith('.json')]
@@ -2933,7 +2950,7 @@ def task_policy(task):
                     )
         # PHASE 2: EXECUTION (Plan exists now)
 
-        print(f"[{ti.task_id}] Plan found at {plan_path}. Preparing to execute with carbon-aware scheduling.")
+        _log(f"[{ti.task_id}] Plan found at {plan_path}. Preparing to execute with carbon-aware scheduling.")
         with open(plan_path, 'r') as f:
             manifest = json.load(f)
             
@@ -2941,7 +2958,7 @@ def task_policy(task):
         if not my_plan: return # Failsafe
             
         target_time = dt.datetime.fromisoformat(my_plan['start']).replace(tzinfo=dt.timezone.utc)
-        print(f"[{ti.task_id}] Scheduled to run at {target_time} in region {my_plan['region']}")
+        _log(f"[{ti.task_id}] Scheduled to run at {target_time} in region {my_plan['region']}")
         # Hold execution until the scheduled start time
         if dt.datetime.now(dt.timezone.utc) < target_time - dt.timedelta(minutes=2):
             raise AirflowRescheduleException(reschedule_date=target_time)
@@ -2954,7 +2971,7 @@ def run_batch_coordinator(waiting_files):
     """
     Executes Algorithm 4 for the queue.
     """
-    print(f"\n[COORDINATOR] Queue threshold reached! Running Algorithm 4 for {len(waiting_files)} workflows.")
+    _log(f"\n[COORDINATOR] Queue threshold reached! Running Algorithm 4 for {len(waiting_files)} workflows.")
     
     batch_data = []
     for f_name in waiting_files:
@@ -2982,4 +2999,4 @@ def run_batch_coordinator(waiting_files):
             os.remove(os.path.join(WAITING_ROOM_DIR, f_name))
         except OSError:
             pass
-    print("[COORDINATOR] Plans distributed. Waiting room cleared.\n")
+    _log("[COORDINATOR] Plans distributed. Waiting room cleared.\n")
