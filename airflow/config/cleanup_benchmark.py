@@ -41,7 +41,7 @@ def find_files(delete_all: bool) -> list[str]:
     # ensuring general summary comparison plots (plot_*.png) are never included.
     return [
         f for f in candidates 
-        if "bench_" in os.path.basename(f) or "batch_" in os.path.basename(f)
+        if "bench_" in os.path.basename(f) or "batch_" in os.path.basename(f) or "oracle_" in os.path.basename(f)
     ]
 
 

@@ -36,8 +36,12 @@ from pathlib import Path
 
 # Duration bucket weights (hours): short=1h, medium=2-3h, long=4-6h
 # ~60% of Alibaba tasks are short-lived; the rest spread across medium/long
-DURATION_CHOICES  = [1,    2,    3,    4,    5,    6  ]
-DURATION_WEIGHTS  = [0.42, 0.22, 0.14, 0.10, 0.07, 0.05]
+DURATION_CHOICES_STANDARD = [1,    2,    3,    4,    5,    6  ]
+DURATION_WEIGHTS_STANDARD = [0.42, 0.22, 0.14, 0.10, 0.07, 0.05]
+
+# Short-task variant: tasks are 0.25-2 hours for batch scheduling relevance testing
+DURATION_CHOICES_SHORT = [0.25, 0.5,  1,    1.5,  2  ]
+DURATION_WEIGHTS_SHORT = [0.30, 0.35, 0.20, 0.10, 0.05]
 
 # Core demand weights: most tasks are light (1 core); heavy tasks (4 cores)
 # are less common but appear in ML/data-processing jobs
@@ -53,8 +57,6 @@ DAG_SHAPES = [
     "fan_in",       # {T1, T2, T3} → T4                 gather/reduce
     "diamond",      # T1 → {T2, T3} → T4                fork-join unit
     "wide_diamond", # T1 → {T2..T5} → T6               wider fork-join
-    "chain_diamond",# two diamonds chained               complex pipeline
-    "mesh",         # full overlap of fan-out + fan-in   realistic DAG
     "parallel",     # no edges at all                    independent tasks
 ]
 
@@ -74,52 +76,64 @@ class WorkloadGenerator:
         Must match TOTAL_CORES_PER_REGION in airflow_local_settings.py.
     """
 
-    def __init__(self, seed: int = 42, alibaba_csv=None, total_cores_per_region: int = 4):
+    def __init__(self, seed: int = 42, alibaba_csv=None, total_cores_per_region: int = 4, task_profile: str = "standard"):
         self.rng = random.Random(seed)
         np.random.seed(seed)
         self.max_cores = total_cores_per_region
+        self.task_profile = task_profile
 
         if alibaba_csv:
             self._fit_from_alibaba(alibaba_csv)
         else:
-            self._dur_choices = DURATION_CHOICES
-            self._dur_weights  = DURATION_WEIGHTS
+            if task_profile == "short":
+                self._dur_choices = DURATION_CHOICES_SHORT
+                self._dur_weights  = DURATION_WEIGHTS_SHORT
+            else:
+                self._dur_choices = DURATION_CHOICES_STANDARD
+                self._dur_weights  = DURATION_WEIGHTS_STANDARD
             self._core_choices = CORE_CHOICES
             self._core_weights  = CORE_WEIGHTS
 
     # ── Distribution fitting ──────────────────────────────────────────────────
 
     def _fit_from_alibaba(self, csv_path):
-        """
-        Fit duration and core distributions from the real Alibaba batch_task.csv.
+            """
+            Fit duration and core distributions from the real Alibaba batch_task.csv.
 
-        Expected columns (from trace_2018.md schema):
-            task_name, instance_num, job_name, task_duration,
-            status, start_time, end_time, plan_cpu, plan_mem
-        """
-        import pandas as pd
-        print(f"[GENERATOR] Fitting distributions from {csv_path} ...")
-        df = pd.read_csv(csv_path, header=None, names=[
-            "task_name", "instance_num", "job_name", "task_duration",
-            "status", "start_time", "end_time", "plan_cpu", "plan_mem"
-        ])
+            Expected columns (from trace_2018.md schema):
+                task_name, instance_num, job_name, task_duration,
+                status, start_time, end_time, plan_cpu, plan_mem
+            """
+            import pandas as pd
+            print(f"[GENERATOR] Fitting distributions from {csv_path} ...")
+            df = pd.read_csv(csv_path, header=None, names=[
+                "task_name", "instance_num", "job_name", "task_duration",
+                "status", "start_time", "end_time", "plan_cpu", "plan_mem"
+            ])
 
-        # Duration: convert seconds → hours, clamp to [1, 6]
-        df["dur_h"] = (df["task_duration"] / 3600).clip(1, 6).round().astype(int)
-        dur_counts = df["dur_h"].value_counts(normalize=True).sort_index()
-        self._dur_choices = dur_counts.index.tolist()
-        self._dur_weights  = dur_counts.values.tolist()
+            # Convert columns to numeric, forcing invalid strings to NaN
+            df["task_duration"] = pd.to_numeric(df["task_duration"], errors="coerce")
+            df["plan_cpu"] = pd.to_numeric(df["plan_cpu"], errors="coerce")
 
-        # Cores: plan_cpu is in milli-cores (100 = 1 core), clamp to [1, max]
-        df["cores"] = ((df["plan_cpu"] / 100).clip(1, self.max_cores)
-                        .round().astype(int))
-        core_counts = df["cores"].value_counts(normalize=True).sort_index()
-        self._core_choices = core_counts.index.tolist()
-        self._core_weights  = core_counts.values.tolist()
+            # Drop rows where duration or plan_cpu is missing (NaN)
+            df = df.dropna(subset=["task_duration", "plan_cpu"])
 
-        print(f"[GENERATOR] Fitted from {len(df):,} tasks. "
-              f"Duration range: {min(self._dur_choices)}–{max(self._dur_choices)}h | "
-              f"Core range: {min(self._core_choices)}–{max(self._core_choices)}")
+            # Duration: convert seconds → hours, clamp to [1, 6]
+            df["dur_h"] = (100 * df["task_duration"] / 3600).clip(1, 6).round().astype(int)
+            dur_counts = df["dur_h"].value_counts(normalize=True).sort_index()
+            self._dur_choices = dur_counts.index.tolist()
+            self._dur_weights  = dur_counts.values.tolist()
+
+            # Cores: plan_cpu is in milli-cores (100 = 1 core), clamp to [1, max]
+            df["cores"] = ((df["plan_cpu"] / 100).clip(1, self.max_cores)
+                            .round().astype(int))
+            core_counts = df["cores"].value_counts(normalize=True).sort_index()
+            self._core_choices = core_counts.index.tolist()
+            self._core_weights  = core_counts.values.tolist()
+
+            print(f"[GENERATOR] Fitted from {len(df):,} valid tasks. "
+                f"Duration range: {min(self._dur_choices)} - {max(self._dur_choices)}h | "
+                f"Core range: {min(self._core_choices)} - {max(self._core_choices)}")
 
     # ── Primitive samplers ────────────────────────────────────────────────────
 
@@ -251,7 +265,7 @@ class WorkloadGenerator:
             earliest[t["id"]] = start
         return max(earliest[t["id"]] + task_dur[t["id"]] for t in tasks)
 
-    def generate_suite(self, reps_per_shape: int = 3,
+    def generate_suite(self, reps_per_shape: int = 1,
                         deadline_scenarios: list = None) -> list:
         """
         Generate the full benchmark suite.
@@ -260,7 +274,8 @@ class WorkloadGenerator:
         ----------
         reps_per_shape : int
             How many independent workflow instances to create per (shape, deadline) pair.
-            Default 3 gives 8 shapes × 3 deadlines × 3 reps = 72 workflows.
+            Default 1 gives 6 shapes × 3 deadlines × 1 rep = 18 workflows.
+            Use reps_per_shape=2 for short tasks: 6 × 3 × 2 = 36 workflows.
         deadline_scenarios : list[int]
             Deadline windows in hours to test. Default: [12, 24, 48] which covers
             tight, normal, and relaxed scheduling pressure.
@@ -314,12 +329,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Carbon_Scheduler workload generator")
     parser.add_argument("--out",   default="benchmark_workloads.json")
     parser.add_argument("--seed",  type=int, default=42)
-    parser.add_argument("--reps",  type=int, default=3,
+    parser.add_argument("--reps",  type=int, default=1,
                         help="Repetitions per (shape, deadline) combination")
+    parser.add_argument("--profile", type=str, default="standard", choices=["standard", "short"],
+                        help="Task duration profile: 'standard' (1-6h) or 'short' (0.25-2h for batch relevance testing)")
     parser.add_argument("--alibaba-csv", default=None,
                         help="Optional path to Alibaba batch_task.csv for real distributions")
     args = parser.parse_args()
 
-    gen = WorkloadGenerator(seed=args.seed, alibaba_csv=args.alibaba_csv)
+    gen = WorkloadGenerator(seed=args.seed, alibaba_csv=args.alibaba_csv, task_profile=args.profile)
     suite = gen.generate_suite(reps_per_shape=args.reps)
     WorkloadGenerator.save(suite, args.out)
