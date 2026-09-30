@@ -1,0 +1,311 @@
+[
+    {
+        "run_id": "alibaba_j_1000039",
+        "critical_path_hours": 5.3694,
+        "deadline_multiplier_N": 10.0,
+        "deadline_hours": 53.69,
+        "sla_level": 95,
+        "n_tasks": 10,
+        "shape": "alibaba_real_dag",
+        "tasks": [
+            {
+                "id": "task_8",
+                "depends_on": [
+                    "task_1",
+                    "task_7"
+                ],
+                "dur": 0.5361,
+                "cores": 0.5
+            },
+            {
+                "id": "task_7",
+                "depends_on": [
+                    "task_3",
+                    "task_4",
+                    "task_6"
+                ],
+                "dur": 0.5222,
+                "cores": 0.5
+            },
+            {
+                "id": "task_4",
+                "depends_on": [],
+                "dur": 0.4944,
+                "cores": 0.5
+            },
+            {
+                "id": "task_5",
+                "depends_on": [],
+                "dur": 0.1111,
+                "cores": 0.5
+            },
+            {
+                "id": "task_9",
+                "depends_on": [
+                    "task_8"
+                ],
+                "dur": 1.3917,
+                "cores": 0.5
+            },
+            {
+                "id": "task_3",
+                "depends_on": [
+                    "task_2"
+                ],
+                "dur": 0.0194,
+                "cores": 0.5
+            },
+            {
+                "id": "task_2",
+                "depends_on": [],
+                "dur": 0.0083,
+                "cores": 0.5
+            },
+            {
+                "id": "task_6",
+                "depends_on": [
+                    "task_5"
+                ],
+                "dur": 0.1417,
+                "cores": 0.5
+            },
+            {
+                "id": "task_10",
+                "depends_on": [
+                    "task_9"
+                ],
+                "dur": 2.425,
+                "cores": 0.5
+            },
+            {
+                "id": "task_1",
+                "depends_on": [],
+                "dur": 0.0083,
+                "cores": 0.5
+            }
+        ],
+        "submit_time_relative_seconds": 0
+    },
+    {
+        "run_id": "alibaba_j_1000038",
+        "critical_path_hours": 4.0417,
+        "deadline_multiplier_N": 10.0,
+        "deadline_hours": 40.42,
+        "sla_level": 95,
+        "n_tasks": 8,
+        "shape": "alibaba_real_dag",
+        "tasks": [
+            {
+                "id": "task_7",
+                "depends_on": [
+                    "task_2",
+                    "task_4",
+                    "task_6"
+                ],
+                "dur": 1.1167,
+                "cores": 0.5
+            },
+            {
+                "id": "task_2",
+                "depends_on": [
+                    "task_1"
+                ],
+                "dur": 1.05,
+                "cores": 0.5
+            },
+            {
+                "id": "task_5",
+                "depends_on": [],
+                "dur": 0.5139,
+                "cores": 0.5
+            },
+            {
+                "id": "task_1",
+                "depends_on": [],
+                "dur": 0.7389,
+                "cores": 0.5
+            },
+            {
+                "id": "task_4",
+                "depends_on": [
+                    "task_3"
+                ],
+                "dur": 0.8861,
+                "cores": 0.5
+            },
+            {
+                "id": "task_3",
+                "depends_on": [],
+                "dur": 0.6972,
+                "cores": 0.5
+            },
+            {
+                "id": "task_8",
+                "depends_on": [
+                    "task_7"
+                ],
+                "dur": 1.1361,
+                "cores": 0.5
+            },
+            {
+                "id": "task_6",
+                "depends_on": [
+                    "task_5"
+                ],
+                "dur": 0.6167,
+                "cores": 0.5
+            }
+        ],
+        "submit_time_relative_seconds": 244950
+    },
+    {
+        "run_id": "alibaba_j_1000078",
+        "critical_path_hours": 0.175,
+        "deadline_multiplier_N": 10.0,
+        "deadline_hours": 2.0,
+        "sla_level": 95,
+        "n_tasks": 5,
+        "shape": "alibaba_real_dag",
+        "tasks": [
+            {
+                "id": "task_5",
+                "depends_on": [
+                    "task_4"
+                ],
+                "dur": 0.0306,
+                "cores": 1.0
+            },
+            {
+                "id": "task_1",
+                "depends_on": [],
+                "dur": 0.0083,
+                "cores": 1.0
+            },
+            {
+                "id": "task_2",
+                "depends_on": [
+                    "task_1"
+                ],
+                "dur": 0.0083,
+                "cores": 1.0
+            },
+            {
+                "id": "task_3",
+                "depends_on": [],
+                "dur": 0.0611,
+                "cores": 1.0
+            },
+            {
+                "id": "task_4",
+                "depends_on": [
+                    "task_2",
+                    "task_3"
+                ],
+                "dur": 0.0833,
+                "cores": 1.0
+            }
+        ],
+        "submit_time_relative_seconds": 246973
+    },
+    {
+        "run_id": "alibaba_j_1000075",
+        "critical_path_hours": 0.0611,
+        "deadline_multiplier_N": 10.0,
+        "deadline_hours": 2.0,
+        "sla_level": 95,
+        "n_tasks": 3,
+        "shape": "alibaba_real_dag",
+        "tasks": [
+            {
+                "id": "task_2",
+                "depends_on": [
+                    "task_1"
+                ],
+                "dur": 0.0222,
+                "cores": 0.5
+            },
+            {
+                "id": "task_3",
+                "depends_on": [
+                    "task_2"
+                ],
+                "dur": 0.0306,
+                "cores": 0.5
+            },
+            {
+                "id": "task_1",
+                "depends_on": [],
+                "dur": 0.0083,
+                "cores": 0.5
+            }
+        ],
+        "submit_time_relative_seconds": 491582
+    },
+    {
+        "run_id": "alibaba_j_1000037",
+        "critical_path_hours": 0.025,
+        "deadline_multiplier_N": 10.0,
+        "deadline_hours": 2.0,
+        "sla_level": 95,
+        "n_tasks": 3,
+        "shape": "alibaba_real_dag",
+        "tasks": [
+            {
+                "id": "task_1",
+                "depends_on": [],
+                "dur": 0.0028,
+                "cores": 1.0
+            },
+            {
+                "id": "task_2",
+                "depends_on": [
+                    "task_1"
+                ],
+                "dur": 0.0028,
+                "cores": 1.0
+            },
+            {
+                "id": "task_3",
+                "depends_on": [
+                    "task_2"
+                ],
+                "dur": 0.0194,
+                "cores": 1.0
+            }
+        ],
+        "submit_time_relative_seconds": 503961
+    },
+    {
+        "run_id": "alibaba_j_1000034",
+        "critical_path_hours": 0.0194,
+        "deadline_multiplier_N": 10.0,
+        "deadline_hours": 2.0,
+        "sla_level": 95,
+        "n_tasks": 3,
+        "shape": "alibaba_real_dag",
+        "tasks": [
+            {
+                "id": "task_2",
+                "depends_on": [],
+                "dur": 0.0028,
+                "cores": 1.0
+            },
+            {
+                "id": "task_3",
+                "depends_on": [
+                    "task_1",
+                    "task_2"
+                ],
+                "dur": 0.0111,
+                "cores": 1.0
+            },
+            {
+                "id": "task_1",
+                "depends_on": [],
+                "dur": 0.0083,
+                "cores": 1.0
+            }
+        ],
+        "submit_time_relative_seconds": 561816
+    }
+]

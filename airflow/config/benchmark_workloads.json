@@ -1,0 +1,903 @@
+[
+  {
+    "run_id": "bench_linear_12h_r1_001",
+    "shape": "linear",
+    "deadline_hours": 12,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 5.2
+      },
+      {
+        "id": "T2",
+        "dur": 3,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 18.0
+      },
+      {
+        "id": "T3",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T2"
+        ],
+        "output_size_gb": 1.6
+      }
+    ],
+    "n_tasks": 3,
+    "total_core_hours": 8,
+    "critical_path_lb": 5
+  },
+  {
+    "run_id": "bench_linear_24h_r1_002",
+    "shape": "linear",
+    "deadline_hours": 24,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 11.7
+      },
+      {
+        "id": "T2",
+        "dur": 3,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 9.0
+      },
+      {
+        "id": "T3",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T2"
+        ],
+        "output_size_gb": 17.5
+      },
+      {
+        "id": "T4",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [
+          "T3"
+        ],
+        "output_size_gb": 9.0
+      }
+    ],
+    "n_tasks": 4,
+    "total_core_hours": 13,
+    "critical_path_lb": 9
+  },
+  {
+    "run_id": "bench_linear_48h_r1_003",
+    "shape": "linear",
+    "deadline_hours": 48,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 7.4
+      },
+      {
+        "id": "T2",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 17.1
+      },
+      {
+        "id": "T3",
+        "dur": 2,
+        "cores": 3,
+        "depends_on": [
+          "T2"
+        ],
+        "output_size_gb": 14.9
+      },
+      {
+        "id": "T4",
+        "dur": 2,
+        "cores": 4,
+        "depends_on": [
+          "T3"
+        ],
+        "output_size_gb": 8.2
+      },
+      {
+        "id": "T5",
+        "dur": 2,
+        "cores": 3,
+        "depends_on": [
+          "T4"
+        ],
+        "output_size_gb": 12.8
+      }
+    ],
+    "n_tasks": 5,
+    "total_core_hours": 25,
+    "critical_path_lb": 8
+  },
+  {
+    "run_id": "bench_fan_out_12h_r1_004",
+    "shape": "fan_out",
+    "deadline_hours": 12,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 13.6
+      },
+      {
+        "id": "T2",
+        "dur": 3,
+        "cores": 4,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 17.3
+      },
+      {
+        "id": "T3",
+        "dur": 4,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 9.6
+      },
+      {
+        "id": "T4",
+        "dur": 4,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 7.8
+      },
+      {
+        "id": "T5",
+        "dur": 3,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 14.0
+      }
+    ],
+    "n_tasks": 5,
+    "total_core_hours": 27,
+    "critical_path_lb": 5
+  },
+  {
+    "run_id": "bench_fan_out_24h_r1_005",
+    "shape": "fan_out",
+    "deadline_hours": 24,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 5.7
+      },
+      {
+        "id": "T2",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 18.6
+      },
+      {
+        "id": "T3",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 7.2
+      },
+      {
+        "id": "T4",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 16.6
+      },
+      {
+        "id": "T5",
+        "dur": 4,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 2.3
+      }
+    ],
+    "n_tasks": 5,
+    "total_core_hours": 14,
+    "critical_path_lb": 6
+  },
+  {
+    "run_id": "bench_fan_out_48h_r1_006",
+    "shape": "fan_out",
+    "deadline_hours": 48,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 18.4
+      },
+      {
+        "id": "T2",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 5.7
+      },
+      {
+        "id": "T3",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 12.1
+      }
+    ],
+    "n_tasks": 3,
+    "total_core_hours": 7,
+    "critical_path_lb": 5
+  },
+  {
+    "run_id": "bench_fan_in_12h_r1_007",
+    "shape": "fan_in",
+    "deadline_hours": 12,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 10.7
+      },
+      {
+        "id": "T2",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 3.1
+      },
+      {
+        "id": "T3",
+        "dur": 2,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 9.0
+      },
+      {
+        "id": "T4",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T1",
+          "T2",
+          "T3"
+        ],
+        "output_size_gb": 19.9
+      }
+    ],
+    "n_tasks": 4,
+    "total_core_hours": 10,
+    "critical_path_lb": 3
+  },
+  {
+    "run_id": "bench_fan_in_24h_r1_008",
+    "shape": "fan_in",
+    "deadline_hours": 24,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 4,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 14.7
+      },
+      {
+        "id": "T2",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 6.1
+      },
+      {
+        "id": "T3",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 9.3
+      },
+      {
+        "id": "T4",
+        "dur": 2,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 17.6
+      },
+      {
+        "id": "T5",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T1",
+          "T2",
+          "T3",
+          "T4"
+        ],
+        "output_size_gb": 4.4
+      }
+    ],
+    "n_tasks": 5,
+    "total_core_hours": 19,
+    "critical_path_lb": 5
+  },
+  {
+    "run_id": "bench_fan_in_48h_r1_009",
+    "shape": "fan_in",
+    "deadline_hours": 48,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 12.6
+      },
+      {
+        "id": "T2",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 11.2
+      },
+      {
+        "id": "T3",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 1.0
+      },
+      {
+        "id": "T4",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 18.7
+      },
+      {
+        "id": "T5",
+        "dur": 4,
+        "cores": 3,
+        "depends_on": [
+          "T1",
+          "T2",
+          "T3",
+          "T4"
+        ],
+        "output_size_gb": 6.8
+      }
+    ],
+    "n_tasks": 5,
+    "total_core_hours": 20,
+    "critical_path_lb": 7
+  },
+  {
+    "run_id": "bench_diamond_12h_r1_010",
+    "shape": "diamond",
+    "deadline_hours": 12,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 2.5
+      },
+      {
+        "id": "T2",
+        "dur": 3,
+        "cores": 3,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 19.6
+      },
+      {
+        "id": "T3",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 13.5
+      },
+      {
+        "id": "T4",
+        "dur": 5,
+        "cores": 1,
+        "depends_on": [
+          "T2",
+          "T3"
+        ],
+        "output_size_gb": 11.0
+      }
+    ],
+    "n_tasks": 4,
+    "total_core_hours": 18,
+    "critical_path_lb": 9
+  },
+  {
+    "run_id": "bench_diamond_24h_r1_011",
+    "shape": "diamond",
+    "deadline_hours": 24,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 6,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 15.4
+      },
+      {
+        "id": "T2",
+        "dur": 3,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 8.6
+      },
+      {
+        "id": "T3",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 18.1
+      },
+      {
+        "id": "T4",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T2",
+          "T3"
+        ],
+        "output_size_gb": 2.2
+      }
+    ],
+    "n_tasks": 4,
+    "total_core_hours": 35,
+    "critical_path_lb": 11
+  },
+  {
+    "run_id": "bench_diamond_48h_r1_012",
+    "shape": "diamond",
+    "deadline_hours": 48,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 5.2
+      },
+      {
+        "id": "T2",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 5.3
+      },
+      {
+        "id": "T3",
+        "dur": 5,
+        "cores": 3,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 2.3
+      },
+      {
+        "id": "T4",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [
+          "T2",
+          "T3"
+        ],
+        "output_size_gb": 5.1
+      }
+    ],
+    "n_tasks": 4,
+    "total_core_hours": 21,
+    "critical_path_lb": 8
+  },
+  {
+    "run_id": "bench_wide_diamond_12h_r1_013",
+    "shape": "wide_diamond",
+    "deadline_hours": 12,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 5,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 10.0
+      },
+      {
+        "id": "T2",
+        "dur": 4,
+        "cores": 3,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 4.6
+      },
+      {
+        "id": "T3",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 9.0
+      },
+      {
+        "id": "T4",
+        "dur": 2,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 13.8
+      },
+      {
+        "id": "T5",
+        "dur": 6,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 8.6
+      },
+      {
+        "id": "T6",
+        "dur": 1,
+        "cores": 3,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 5.7
+      },
+      {
+        "id": "T7",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T2",
+          "T3",
+          "T4",
+          "T5",
+          "T6"
+        ],
+        "output_size_gb": 9.0
+      }
+    ],
+    "n_tasks": 7,
+    "total_core_hours": 37,
+    "critical_path_lb": 12
+  },
+  {
+    "run_id": "bench_wide_diamond_24h_r1_014",
+    "shape": "wide_diamond",
+    "deadline_hours": 24,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 9.4
+      },
+      {
+        "id": "T2",
+        "dur": 4,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 2.0
+      },
+      {
+        "id": "T3",
+        "dur": 6,
+        "cores": 3,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 19.4
+      },
+      {
+        "id": "T4",
+        "dur": 5,
+        "cores": 3,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 4.2
+      },
+      {
+        "id": "T5",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 8.6
+      },
+      {
+        "id": "T6",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T2",
+          "T3",
+          "T4",
+          "T5"
+        ],
+        "output_size_gb": 19.7
+      }
+    ],
+    "n_tasks": 6,
+    "total_core_hours": 48,
+    "critical_path_lb": 8
+  },
+  {
+    "run_id": "bench_wide_diamond_48h_r1_015",
+    "shape": "wide_diamond",
+    "deadline_hours": 48,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 14.9
+      },
+      {
+        "id": "T2",
+        "dur": 4,
+        "cores": 2,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 10.2
+      },
+      {
+        "id": "T3",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 2.1
+      },
+      {
+        "id": "T4",
+        "dur": 3,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 7.0
+      },
+      {
+        "id": "T5",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [
+          "T1"
+        ],
+        "output_size_gb": 18.5
+      },
+      {
+        "id": "T6",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [
+          "T2",
+          "T3",
+          "T4",
+          "T5"
+        ],
+        "output_size_gb": 10.6
+      }
+    ],
+    "n_tasks": 6,
+    "total_core_hours": 17,
+    "critical_path_lb": 7
+  },
+  {
+    "run_id": "bench_parallel_12h_r1_016",
+    "shape": "parallel",
+    "deadline_hours": 12,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 17.4
+      },
+      {
+        "id": "T2",
+        "dur": 1,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 11.8
+      },
+      {
+        "id": "T3",
+        "dur": 2,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 2.6
+      },
+      {
+        "id": "T4",
+        "dur": 3,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 7.0
+      }
+    ],
+    "n_tasks": 4,
+    "total_core_hours": 13,
+    "critical_path_lb": 3
+  },
+  {
+    "run_id": "bench_parallel_24h_r1_017",
+    "shape": "parallel",
+    "deadline_hours": 24,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 5.5
+      },
+      {
+        "id": "T2",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 6.7
+      },
+      {
+        "id": "T3",
+        "dur": 1,
+        "cores": 2,
+        "depends_on": [],
+        "output_size_gb": 2.4
+      },
+      {
+        "id": "T4",
+        "dur": 2,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 19.9
+      },
+      {
+        "id": "T5",
+        "dur": 1,
+        "cores": 1,
+        "depends_on": [],
+        "output_size_gb": 6.0
+      }
+    ],
+    "n_tasks": 5,
+    "total_core_hours": 15,
+    "critical_path_lb": 2
+  },
+  {
+    "run_id": "bench_parallel_48h_r1_018",
+    "shape": "parallel",
+    "deadline_hours": 48,
+    "sla_level": 95,
+    "tasks": [
+      {
+        "id": "T1",
+        "dur": 5,
+        "cores": 3,
+        "depends_on": [],
+        "output_size_gb": 8.0
+      },
+      {
+        "id": "T2",
+        "dur": 1,
+        "cores": 3,
+        "depends_on": [],
+        "output_size_gb": 14.4
+      },
+      {
+        "id": "T3",
+        "dur": 2,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 13.4
+      },
+      {
+        "id": "T4",
+        "dur": 1,
+        "cores": 3,
+        "depends_on": [],
+        "output_size_gb": 6.7
+      },
+      {
+        "id": "T5",
+        "dur": 3,
+        "cores": 4,
+        "depends_on": [],
+        "output_size_gb": 3.6
+      }
+    ],
+    "n_tasks": 5,
+    "total_core_hours": 41,
+    "critical_path_lb": 5
+  }
+]
