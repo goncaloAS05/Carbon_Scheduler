@@ -26,7 +26,7 @@ When a task is ready to execute, the Airflow hook reads its manifest, waits unti
 │   │   ├── workload_generator.py       Synthetic DAG workload generation
 │   │   └── cleanup_benchmark.py        Safe cleanup for benchmark outputs
 │   ├── dags/                            Airflow DAG definitions
-│   ├── plugins/data/                    Carbon CSV data and region configuration
+│   ├── config/data/                     Carbon CSV data and region configuration
 │   ├── plans/                           Generated plans and heatmaps
 │   ├── waiting_room/                    Queued workflow metadata
 │   ├── cluster_state.json               Hourly regional CPU reservations
@@ -71,16 +71,16 @@ python -m pytest -q
 
 ## Carbon Data
 
-The scheduler loads files named `log_<REGION>.csv` from `airflow/plugins/data/`. The expected columns include:
+The scheduler loads files named `log_<REGION>.csv` from `airflow/config/data/`. The expected columns include:
 
 - `Datetime (UTC)`
 - `Carbon intensity gCO₂eq/kWh (Life cycle)`
 
-Region codes are read from `airflow/plugins/data/regions_123.txt`. If that file is missing or empty, the scheduler falls back to `DE`, `PL`, `PT`, and `ES`.
+Region codes are read from `airflow/config/data/regions_123.txt`. If that file is missing or empty, the scheduler falls back to `DE`, `PL`, `PT`, and `ES`.
 
-The data downloader is [`airflow/plugins/data/fetch_carbon_data.py`](airflow/plugins/data/fetch_carbon_data.py). It uses the Electricity Maps API and should be configured with a credential supplied through a secure environment or secret-management mechanism before use. Do not commit API tokens to the repository.
+The data downloader is [`airflow/config/data/fetch_carbon_data.py`](airflow/config/data/fetch_carbon_data.py). It uses the Electricity Maps API and should be configured with a credential supplied through a secure environment or secret-management mechanism before use. Do not commit API tokens to the repository.
 
-If you already have compatible CSV files, place them in `airflow/plugins/data/` and make sure their region names match `regions_123.txt`.
+If you already have compatible CSV files, place them in `airflow/config/data/` and make sure their region names match `regions_123.txt`.
 
 ## Running Airflow
 
@@ -134,13 +134,10 @@ The algorithm selected for Airflow execution is controlled by `ACTIVE_ALGORITHM`
 
 | ID | Name | Description |
 | ---: | --- | --- |
-| 1 | Global window | Finds a single low-carbon window for the workflow. |
-| 2 | Transfer-aware window | Adds network transfer time and carbon cost. |
 | 3 | Spatio-temporal task scheduling | Places tasks across regions and time using dependencies, capacity, and RLE carbon buckets. |
 | 4 | Batch planner | Schedules queued workflows using a batch heuristic. |
 | 5 | Baseline A | Earliest feasible task placement across regions. |
 | 6 | Baseline B | Local-first placement with external-region fallback. |
-| 7 | Atomic baseline | Schedules the workflow as one continuous block. |
 | 8 | Oracle | Compares workflow orderings using the task-level planner. |
 | 9 | Atomic Oracle | Compares workflow orderings using the atomic planner. |
 | 13 | Temporal batch baseline | Batch task-level scheduling with temporal shifting. |
@@ -190,6 +187,39 @@ Useful options:
 
 Benchmark output includes metric files, comparison plots, scheduler logs, and saved state snapshots. The main metrics include execution carbon, transfer carbon, total carbon, makespan, waiting time, deadline fulfillment, and success rate.
 
+### Analyse Benchmark Results
+
+After the benchmark finishes, run the post-processing script from the repository root:
+
+```bash
+python airflow/config/benchmark_results/analysis.py
+```
+
+This reads [`benchmark_results_total.csv`](airflow/config/benchmark_results/benchmark_results_total.csv) and writes the analysis plots to `airflow/config/benchmark_results/analysis/`. It prints the mean metrics for each algorithm and generates:
+
+- runner-equivalent carbon boxplot, success-rate chart, makespan/deadline chart, background-load heatmap, one readable 3×3 origin-region carbon figure using a shared y-scale, and an average-carbon heatmap covering all regional carbon CSVs;
+- quadrant plots for carbon versus makespan, success rate, transfer carbon, and decision time, with explicit lower/higher-is-better labels.
+
+To use another results file or output folder:
+
+```bash
+python airflow/config/benchmark_results/analysis.py \
+  --results path/to/benchmark_results_total.csv \
+  --out-dir path/to/analysis
+```
+
+Permutation analysis is optional and can be expensive because it evaluates every ordering. For example, this evaluates at most five matching workflows (`5! = 120` orderings):
+
+```bash
+python airflow/config/benchmark_results/analysis.py \
+  --permute \
+  --workloads airflow/config/benchmark_workloads.json \
+  --permute-max 5 \
+  --permute-deadline 24
+```
+
+Use `--help` to see all options. Run the script without `--permute` for the normal CSV analysis; permutation mode is not required for the benchmark plots.
+
 ### Clean Benchmark Outputs
 
 Preview matching generated files:
@@ -236,7 +266,7 @@ Important settings live near the top of [`airflow_local_settings.py`](airflow/co
 - `BATCH_SIZE`: number of workflows required before batch coordination
 - `TOTAL_CORES_PER_REGION`: per-region hourly CPU capacity
 - `REGIONS_FILE`: source of configured region codes
-- `DATA_DIR`: location of carbon CSV files
+- `DATA_DIR`: location of carbon CSV files (`airflow/config/data/`)
 - `PLAN_DIR`: generated plans and heatmaps
 - `WAITING_ROOM_DIR`: queued workflow metadata
 

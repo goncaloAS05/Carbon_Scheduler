@@ -9,3 +9,5 @@ airflow/logs/
 # Python
 __pycache__/
 *.pyc
+.venv/
+airflow/airflow_venv/
