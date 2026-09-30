@@ -4,28 +4,29 @@ benchmark_runner.py
 Runs all Carbon_Scheduler algorithms against a benchmark workload suite and
 produces a structured results CSV + comparison plots.
 
-Workload Profiles:
-    - Standard (default): 6 shapes × 3 deadlines × 1 rep = 18 workflows, tasks 1-6h
-    - Short tasks: 6 shapes × 3 deadlines × 2 reps = 36 workflows, tasks 0.25-2h
-      To generate: python workload_generator.py --profile short --reps 2 --out benchmark_workloads_short.json
-      Then run: python benchmark_runner.py --workloads benchmark_workloads_short.json
-      Short-task variants make scheduling delays more relevant in batch operations.
-
 Algorithms benchmarked:
-    1  — Whole-workflow window search (single region)
-    2  — Whole-workflow + network transfer penalties
     3  — Spatio-temporal task-level shifting with RLE (ACTIVE)
     4  — Alg4_Batch_EDF: Multi-workflow batch packing (Earliest Deadline First)
     42 — Alg4_Batch_LWF: Multi-workflow batch packing (Least Waste First)
     5  — Baseline A: Earliest start across all regions
     6  — Baseline B: Local-first (Portugal)
-    7  — Baseline Atomic: Black-box continuous block
     8  — Oracle: Theoretical Best 
     9  — Atomic_Oracle: Theoretical Best for Atomic Continuous
     10 — Baseline Temporal: Single-Workflow Task-Level Temporal-Only
     11 — Baseline Spatial: Single-Workflow Task-Level Spatial-Only
     13 — Base_Temp_Batch_LWF: Batch Task-Level Temporal-Only (LWF)
     15 — Base_Spat_Batch_LWF: Batch Task-Level Spatial-Only (LWF)
+
+Run from the repository root:
+    python airflow/config/benchmark_runner.py --help
+    python airflow/config/benchmark_runner.py \
+        --workloads airflow/config/benchmark_workloads.json \
+        --out-dir airflow/config/benchmark_results \
+        --algorithms 3 4 5 6 8 9 13 15 \
+        --load empty
+
+The default algorithm set is `8 9 42 13 15`; use `--algorithms` to select
+the retained schedulers explicitly. Use `--max N` to limit the workload count.
 """
 
 import os
@@ -61,13 +62,10 @@ if "airflow" not in sys.modules:
     sys.modules["airflow.exceptions"] = airflow_exceptions
 
 from airflow_local_settings import (
-    plan_workflow_alg1,
-    plan_workflow_alg2,
     plan_workflow_alg3,
     plan_batch_alg4,
     plan_baseline_A,
     plan_baseline_B,
-    plan_atomic,
     plan_atomic_oracle,
     plan_oracle,
     plan_baseline_task_temporal_only,
@@ -91,14 +89,11 @@ from airflow_local_settings import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 ALGORITHM_MAP = {
-    1: ("Alg1_GlobalWindow",     plan_workflow_alg1),
-    2: ("Alg2_TransferAware",    plan_workflow_alg2),
     3: ("Alg3_RLE_Spatio",       plan_workflow_alg3),
     4: ("Alg4_Batch_EDF",        plan_batch_alg4),
     42:("Alg4_Batch_LWF",        plan_batch_alg4),
     5: ("BaselineA_Earliest",    plan_baseline_A),
     6: ("BaselineB_LocalFirst",  plan_baseline_B),
-    7: ("BaselineC_Atomic",      plan_atomic),
     8: ("Oracle",                plan_oracle),
     9: ("Atomic_Oracle",         plan_atomic_oracle),
     10:("Base_Temporal",         plan_baseline_task_temporal_only),
@@ -145,12 +140,7 @@ def _call_algorithm(alg_id: int, workflow: dict,
     ]
 
     try:
-        if alg_id == 1:
-            plan = plan_workflow_alg1(run_id, submission, deadline, tasks)
-        elif alg_id == 2:
-            plan = plan_workflow_alg2(run_id, submission, deadline, tasks, DATA_SIZE_GB,
-                                      in_memory_state=load_cluster_state(), source_region=source_region)
-        elif alg_id == 3:
+        if alg_id == 3:
             plan = plan_workflow_alg3(run_id, submission, deadline, tasks, edges, sla,
                                       in_memory_state=load_cluster_state(), source_region=source_region)
         elif alg_id == 5:
@@ -159,9 +149,6 @@ def _call_algorithm(alg_id: int, workflow: dict,
         elif alg_id == 6:
             plan = plan_baseline_B(run_id, submission, deadline, tasks, edges,
                                    load_cluster_state(), source_region=source_region)
-        elif alg_id == 7:
-            plan = plan_atomic(run_id, submission, deadline, tasks, edges,
-                               load_cluster_state(), source_region=source_region)
         elif alg_id == 10:
             plan = plan_baseline_task_temporal_only(run_id, submission, deadline, tasks, DATA_SIZE_GB,
                                                     in_memory_state=load_cluster_state(), source_region=source_region)
@@ -328,7 +315,9 @@ def run_benchmark(workloads: list, algorithms: list[int],
 
     rows = []
     combo_counter = 0
-    out_csv = os.path.join(out_dir, "benchmark_results.csv")
+    out_csv = os.path.join(out_dir, "benchmark_results_alg5.csv")
+    if os.path.exists(out_csv):
+        os.remove(out_csv)
     last_flushed_index = 0
 
     def _flush_results():
@@ -349,37 +338,47 @@ def run_benchmark(workloads: list, algorithms: list[int],
     # Isolate non-batch engines from the batch evaluation algorithms
     batch_alg_ids = [a for a in algorithms if a in [4, 42, 8, 9, 12, 13, 14, 15]]
     single_algs = [a for a in algorithms if a not in batch_alg_ids]
-    BATCH_SIZE  = 6  
+    BATCH_SIZE  = 6
 
     # ── Single-workflow algorithms ──
     if single_algs:
         seen_combos = set()
         combos = []
-        for wf in workloads:
-            deadline_h = wf.get("deadline_hours", 24)
-            for scenario in _build_submission_regions(deadline_h):
-                for load_label in load_scenarios:
-                    key = (deadline_h, scenario["label"], load_label)
-                    if key not in seen_combos:
-                        seen_combos.add(key)
-                        combos.append((deadline_h, scenario, load_label))
+        max_deadline_h = max(
+            (wf.get("deadline_hours", 24) for wf in workloads),
+            default=24,
+        )
+        for scenario in _build_submission_regions(max_deadline_h):
+            for load_label in load_scenarios:
+                key = (scenario["label"], load_label)
+                if key not in seen_combos:
+                    seen_combos.add(key)
+                    combos.append((scenario, load_label))
 
         _log(f"[RUNNER] Single-workflow evaluation will run {len(single_algs)} algorithms over {len(combos)} scenario/load combinations.")
+        print(
+            f"[RUNNER] Single-workflow evaluation: {len(workloads)} workloads "
+            f"across {len(combos)} origin/deadline/load scenarios."
+        )
         for alg_id in single_algs:
             alg_label = ALGORITHM_MAP[alg_id][0]
             _log(f"[RUNNER] Starting sequential simulation block for {alg_label} ...")
             _log(f"[RUNNER] {alg_label} will evaluate {len(combos)} scenario/load combos in up to {len(workloads)} workflows.")
             alg_start = time.perf_counter()
 
-            for deadline_h, scenario, load_label in combos:
-                batch_wfs = [wf for wf in workloads if wf.get("deadline_hours", 24) == deadline_h]
-                if not batch_wfs:
-                    continue
-
+            for scenario, load_label in combos:
                 submission = scenario["submission"]
-                deadline   = scenario["deadline"]
                 origin_reg = scenario["origin_region"]
-                all_traces = {reg: load_carbon_data(reg, submission, deadline) for reg in REGIONS}
+                batch_wfs = workloads
+                batch_deadline_h = max(
+                    (wf.get("deadline_hours", 24) for wf in batch_wfs),
+                    default=24,
+                )
+                trace_deadline = submission + dt.timedelta(hours=batch_deadline_h)
+                all_traces = {
+                    reg: load_carbon_data(reg, submission, trace_deadline)
+                    for reg in REGIONS
+                }
                 total_batches = (len(batch_wfs) + BATCH_SIZE - 1) // BATCH_SIZE
 
                 for i in range(0, len(batch_wfs), BATCH_SIZE):
@@ -388,16 +387,19 @@ def run_benchmark(workloads: list, algorithms: list[int],
                     _log(f"  [{alg_label}] scenario={scenario['label']} load={load_label} batch={batch_num}/{total_batches} size={len(sub_batch)}")
 
                     load_factor = LOAD_SCENARIOS[load_label]
-                    bg_seed = hash((deadline_h, load_label, i)) % 10000
-                    bg_state = generate_background_load(submission, deadline, load_factor, seed=bg_seed)
+                    bg_seed = hash((load_label, i)) % 10000
+                    bg_state = generate_background_load(
+                        submission, trace_deadline, load_factor, seed=bg_seed
+                    )
                     save_cluster_state(bg_state)
 
-                    for wf in sub_batch:
+                    for batch_offset, wf in enumerate(sub_batch):
                         base_name = f"{wf['run_id']}_{alg_label}_{scenario['label']}_{load_label}"
                         
                         # --- NEW: Calculate the exact staggered times ---
                         offset_seconds = wf.get("submit_time_relative_seconds", 0)
                         actual_submission = submission + dt.timedelta(seconds=offset_seconds)
+                        deadline_h = wf.get("deadline_hours", 24)
                         actual_deadline = actual_submission + dt.timedelta(hours=deadline_h)
                         # ------------------------------------------------
                         
@@ -460,6 +462,11 @@ def run_benchmark(workloads: list, algorithms: list[int],
 
                         rows.append(row)
                         _flush_results()
+                        print(
+                            f"[RUNNER] {alg_label}: completed workload "
+                            f"{i + batch_offset + 1}/{len(batch_wfs)} "
+                            f"({wf['run_id']}) for {scenario['label']} {load_label}"
+                        )
 
                     combo_counter += 1
                     save_cluster_state({})
@@ -590,9 +597,11 @@ def run_benchmark(workloads: list, algorithms: list[int],
 
         _log(f"[RUNNER] Completed {alg_label} in {time.perf_counter() - batch_start:.2f}s over {alg_combo_count} batched combos.")
 
-    df = pd.DataFrame(rows)
-    out_csv = os.path.join(out_dir, "benchmark_results.csv")
-    df.to_csv(out_csv, index=False)
+    out_csv = os.path.join(out_dir, "benchmark_results_alg5.csv")
+    if os.path.exists(out_csv) and os.path.getsize(out_csv) > 0:
+        df = pd.read_csv(out_csv)
+    else:
+        df = pd.DataFrame(rows)
     _log(f"[RUNNER] Wrote benchmark results to {out_csv}")
     return df
 
@@ -613,13 +622,17 @@ def plot_results(df: pd.DataFrame, out_dir: str):
 
     # 1. Total carbon box plot
     fig, ax = plt.subplots(figsize=(10, 5))
-    data_by_alg = [df_ok[df_ok["algorithm"] == a]["total_carbon"].dropna().values for a in alg_order]
+    data_by_alg = [
+        df_ok[(df_ok["algorithm"] == a) & (df_ok["total_carbon"] > 0)]["total_carbon"].dropna().values
+        for a in alg_order
+    ]
     bp = ax.boxplot(data_by_alg, patch_artist=True, notch=False)
     for patch, alg in zip(bp["boxes"], alg_order):
         patch.set_facecolor(color_map[alg])
     ax.set_xticklabels(alg_order, rotation=15, ha="right")
-    ax.set_ylabel("Total Carbon (gCO₂eq)")
-    ax.set_title("Carbon Footprint Distribution by Algorithm")
+    ax.set_yscale("log")
+    ax.set_ylabel("Total Carbon (gCO₂eq, log scale)")
+    ax.set_title("Carbon Footprint Distribution by Algorithm (Log Scale)")
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:,.0f}"))
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "plot_carbon_boxplot.png"), dpi=150)
@@ -725,7 +738,7 @@ if __name__ == "__main__":
                         help="Target scheduling algorithm identifiers")
     parser.add_argument("--max",         type=int, default=None,
                         help="Cap evaluation matrix sequence run counts")
-    parser.add_argument("--load",        nargs="+", default=["empty", "medium"],
+    parser.add_argument("--load",        nargs="+", default=["empty"],
                         choices=list(LOAD_SCENARIOS.keys()),
                         help="Background thread core block allocations")
     args = parser.parse_args()
