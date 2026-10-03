@@ -247,17 +247,6 @@ Review its path settings before running it. The script defaults to `~/airflow`, 
 python airflow/reset_cluster.py
 ```
 
-## Tests
-
-Run the test suite from the repository root using the development environment:
-
-```bash
-source .venv/bin/activate
-python -m pytest -q
-```
-
-The tests cover carbon-data extraction and an important algorithm 3 behavior: supplying an in-memory cluster state forces a fresh plan instead of reusing a stale plan file.
-
 ## Configuration Notes
 
 Important settings live near the top of [`airflow_local_settings.py`](airflow/config/airflow_local_settings.py):
